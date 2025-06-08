@@ -1,24 +1,31 @@
-﻿using System.Globalization;
-using System.Numerics;
-using System.Text;
-using static S_Interpretor.Ast;
-
-namespace S_Interpretor
+﻿namespace S_Interpretor
 {
+    using System.Globalization;
+    using System.Numerics;
+    using System.Runtime.InteropServices;
+    using System.Text;
+
+    /*
     internal class Program
     {
         static void Main(string[] args)
         {
             string code = File.ReadAllText("code.txt");
-            var ast = new Ast();
-            try 
-            { 
-                ast.Interpret(code, consoleOutput: true, printTree: true); 
-            } catch (Exception e) { Console.WriteLine(e.ToString()); }
-            
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
+            {
+            var ast = new Ast(cts.Token);
+            var test = new Test();
+            ast.Context.RegisterNative("Hello", (object o) => { if(o is Test test) test.Hello(); });
+            ast.Context.RegisterNative("GetTest", () => { return test; });
+            ast.Interpret(code, consoleOutput: true, printTree: true);
+            }
+        }
+        public class Test
+        {
+            public void Hello() { Console.WriteLine("Hello!"); }
         }
     }
-
+    */
     #region Parser
     public class Parser
     {
@@ -74,10 +81,11 @@ namespace S_Interpretor
             { "=", Ast.TokenType.Equals },
             { ",", Ast.TokenType.Comma },
             { "?", Ast.TokenType.Question },
+            { ".", Ast.TokenType.Dot },
             };
 
-            private static readonly HashSet<string> Keywords = new() { "int", "string", "char", "byte", "float", "long", "ulong", "uint", "bool", "double", "IntPtr", "intPtr",
-            "if", "goto", "for", "while", "do", "void","return", "break","continue","try","catch", "switch", "case", "finally" , "var", "default", "throw", "else", "new" };
+            private static readonly HashSet<string> Keywords = new() { "int", "string", "char", "byte", "float", "long", "ulong", "uint", "bool", "double", "IntPtr", "intPtr", "object",
+            "if", "goto", "for", "while", "do", "void","return", "break","continue","try","catch", "switch", "case", "finally" , "var", "default", "throw", "else", "new", "foreach" };
 
             public void ResetCurrent(int pos, Ast.TokenType token, string text)
             {
@@ -105,7 +113,7 @@ namespace S_Interpretor
                     int start = _position;
                     while (_position < _text.Length && (char.IsDigit(_text[_position]) || _text[_position] == '.'))
                         _position++;
-                    CurrentTokenText = _text[start.._position];
+                    CurrentTokenText = _text.Substring(start, _position - start);
                     CurrentTokenType = Ast.TokenType.Number;
                     return;
                 }
@@ -116,7 +124,7 @@ namespace S_Interpretor
                     int start = _position;
                     while (_position < _text.Length && (char.IsLetterOrDigit(_text[_position]) || _text[_position] == '_'))
                         _position++;
-                    CurrentTokenText = _text[start.._position];
+                    CurrentTokenText = _text.Substring(start, _position - start);
                     CurrentTokenType = Keywords.Contains(CurrentTokenText) ? Ast.TokenType.Keyword : Ast.TokenType.Identifier;
                     return;
                 }
@@ -140,7 +148,7 @@ namespace S_Interpretor
                         sb.Append(c);
                     }
 
-                    CurrentTokenText = _text[start.._position];
+                    CurrentTokenText = _text.Substring(start, _position - start);
                     _position++; //skip "
                     CurrentTokenType = Ast.TokenType.InterpolatedString;
                     return;
@@ -178,16 +186,16 @@ namespace S_Interpretor
                     {
                         if (_position >= _text.Length) throw new Exception("Bad escape in char literal");
                         char esc = _text[_position++];
-                        value = esc switch
+                        switch (esc)
                         {
-                            '\\' => '\\',
-                            '\'' => '\'',
-                            '"' => '\"',
-                            'n' => '\n',
-                            'r' => '\r',
-                            't' => '\t',
-                            _ => esc
-                        };
+                            case '\\': value = '\\'; break;
+                            case '\'': value = '\''; break;
+                            case '"': value = '\"'; break;
+                            case 'n': value = '\n'; break;
+                            case 'r': value = '\r'; break;
+                            case 't': value = '\t'; break;
+                            default: value = esc; break;
+                        }
                     }
                     else value = c;
 
@@ -302,13 +310,15 @@ namespace S_Interpretor
                 if (s[i] != '\\') { sb.Append(s[i]); continue; }
 
                 if (++i == s.Length) break;//alone /
-                sb.Append(s[i] switch
+                char append;
+                switch (s[i])
                 {
-                    '\\' => '\\',
-                    '"' => '"',
-                    'n' => '\n',
-                    _ => s[i]
-                });
+                    case '\\': append = '\\'; break;
+                    case '"': append = '"'; break;
+                    case 'n': append = '\n'; break;
+                    default: append = s[i]; break;
+                }
+                sb.Append(append);
             }
             return sb.ToString();
         }
@@ -580,6 +590,32 @@ namespace S_Interpretor
                         return new Ast.CallNode(name, args.ToArray());
                     }
                     var node = new Ast.VariableReferenceNode(name);
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Dot)
+                    {
+                        _lexer.NextToken(); //skip .
+                        string method = _lexer.CurrentTokenText;
+                        Consume(Ast.TokenType.Identifier);
+
+                        var args = new List<Ast.AstNode>();
+                        if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
+                        {
+                            _lexer.NextToken(); //skip (
+                            if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                            {
+                                do
+                                {
+                                    args.Add(ParseExpression());
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                    { _lexer.NextToken(); continue; }
+                                    break;
+                                }
+                                while (true);
+                            }
+                            Consume(Ast.TokenType.ParenClose); //skip )
+                        }
+                        args.Insert(0, node);
+                        return new Ast.CallNode(method, args.ToArray());
+                    }
                     while (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
                     {
                         _lexer.NextToken(); //skip [
@@ -867,12 +903,14 @@ namespace S_Interpretor
     public class Ast
     {
         #region Context
-        public class ExecutionContext
+        public class ExecutionContext : IDisposable
         {
             private const int HeaderSize = 6;
             public const int MaxCallDepth = 512;
+            private const int ObjectTableCapacity = 64;
             private readonly Stack<Dictionary<string, Variable>> _scopes = new();
-            private readonly Stack<int> _memoryOffsets = new();
+            private readonly Stack<int> _memoryOffsets = new(); 
+            private readonly ObjectTable _handles = new(capacity: ObjectTableCapacity);
             private readonly byte[] _memory;
             private int _heapend = 0;
             private int _allocPointer = 0;
@@ -920,7 +958,11 @@ namespace S_Interpretor
                 if(vars > 2048) throw new OutOfMemoryException($"Too many declarations, danger of host memory ddos");
             }
             #region Memory manager
-
+            public void Dispose()
+            {
+                _handles.Dispose();
+                _scopes.Clear();
+            }
             #region Stack manager
             private static readonly Dictionary<Ast.ValueType, Func<byte[], int, object>> typeReaders = new()
             {
@@ -928,6 +970,7 @@ namespace S_Interpretor
                 { Ast.ValueType.IntPtr, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Array, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.String, (heap, offset) => BitConverter.ToInt32(heap, offset) },
+                { Ast.ValueType.Object, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Bool, (heap, offset) => heap[offset] != 0 },
                 { Ast.ValueType.Float, (heap, offset) => BitConverter.ToSingle(heap, offset) },
                 { Ast.ValueType.Double, (heap, offset) => BitConverter.ToDouble(heap, offset) },
@@ -948,6 +991,7 @@ namespace S_Interpretor
                 { Ast.ValueType.IntPtr, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.String, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Array, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
+                { Ast.ValueType.Object, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Bool, (heap, offset, value) => heap[offset] = (bool)value ? (byte)1 : (byte)0 },
                 { Ast.ValueType.Float, (heap, offset, value) => BitConverter.GetBytes((float)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Double, (heap, offset, value) => BitConverter.GetBytes((double)value).CopyTo(heap, offset) },
@@ -971,6 +1015,18 @@ namespace S_Interpretor
 
             public void ExitScope()
             {
+                foreach (var kvp in _scopes.Peek())
+                {
+                    var v = kvp.Value;
+                    if (v.Type != ValueType.Object) continue;
+                    int ptr = BitConverter.ToInt32(_memory, v.Address);
+                    if (ptr >= StackSize)
+                    {
+                        int id = BitConverter.ToInt32(_memory, ptr);
+                        ReleaseObject(id);
+                    }
+                }
+
                 _scopes.Pop();
                 _allocPointer = _memoryOffsets.Pop();
                 CollectGarbage();
@@ -992,28 +1048,30 @@ namespace S_Interpretor
 
                 return new Variable(type, address, size);
             }
-
-            public int GetTypeSize(Ast.ValueType type) => type switch
+            public int GetTypeSize(Ast.ValueType type)
             {
-                ValueType.Int => sizeof(int),
-                ValueType.Bool => sizeof(bool),
-                ValueType.Uint => sizeof(uint),
-                ValueType.Long => sizeof(long),
-                ValueType.Ulong => sizeof(ulong),
-                ValueType.Char => sizeof(char),
-                ValueType.Byte => sizeof(byte),
-                ValueType.Sbyte => sizeof(sbyte),
-                ValueType.Short => sizeof(short),
-                ValueType.UShort => sizeof(ushort),
-                ValueType.Decimal => sizeof(decimal),
-                ValueType.Double => sizeof(double),
-                ValueType.Float => sizeof(float),
-                ValueType.IntPtr => sizeof(int),
-                Ast.ValueType.String => sizeof(int),
-                Ast.ValueType.Array => sizeof(int),
-                Ast.ValueType.Object => sizeof(int),
-                _ => throw new NotSupportedException($"Unsupported type {type}")
-            };
+                switch (type)
+                {
+                    case ValueType.Int: return sizeof(int);
+                    case ValueType.Bool: return sizeof(int);
+                    case ValueType.String: return sizeof(int);
+                    case ValueType.Array: return sizeof(int);
+                    case ValueType.Object: return sizeof(int);
+                    case ValueType.IntPtr: return sizeof(int);
+                    case ValueType.Uint: return sizeof(int);
+                    case ValueType.Long: return sizeof(uint);
+                    case ValueType.Ulong: return sizeof(ulong);
+                    case ValueType.Double: return sizeof(double);
+                    case ValueType.Float: return sizeof(float);
+                    case ValueType.Decimal: return sizeof(decimal);
+                    case ValueType.Char: return sizeof(decimal);
+                    case ValueType.Short: return sizeof(short);
+                    case ValueType.UShort: return sizeof(ushort);
+                    case ValueType.Byte: return sizeof(byte);
+                    case ValueType.Sbyte: return sizeof(sbyte);
+                    default: throw new ApplicationException($"Unsupported type {type}");
+                }
+            }
             public object ReadVariable(string name)
             {
                 var variable = Get(name);
@@ -1152,7 +1210,6 @@ namespace S_Interpretor
                 }
                 
             }
-
             public void StoreStringVariable(string name, string value)
             {
                 var varInfo = Get(name);
@@ -1179,10 +1236,90 @@ namespace S_Interpretor
                 WriteBytes(newPtr, bytes);
                 WriteVariable(name, newPtr);
             }
+            public void ArrayResize(string name, int newLength)
+            {
+                var varInfo = Get(name);
+                if (varInfo.Type != ValueType.Array)
+                    throw new ApplicationException($"{name} is not an array");
+                int oldPtr = (int)ReadVariable(name);
+                if (oldPtr < StackSize || oldPtr >= _memory.Length-sizeof(int))
+                    throw new ArgumentOutOfRangeException($"nullptr");
+                var elemType = GetHeapObjectType(oldPtr);
+                int elemSize = GetTypeSize(elemType);
+                int oldBytes = GetHeapObjectLength(oldPtr);
+                int oldLength = oldBytes / elemSize;
+                int requiredBytes = checked(newLength * elemSize);
+                if (newLength != oldLength)
+                {
+                    int newPtr = Malloc(requiredBytes, elemType);
+                    _memory.AsSpan(oldPtr, oldBytes).CopyTo(_memory.AsSpan(newPtr, oldBytes));
+                    _memory.AsSpan(newPtr + oldBytes, requiredBytes - oldBytes).Clear();
+                    WriteVariable(name, newPtr);
+                    Free(oldPtr);
+                    return;
+                }
+            }
+            public void ArrayAdd(string name, object element)
+            {
+                var type = InferType(element);
+                var varInfo = Get(name);
+                if (varInfo.Type != ValueType.Array)
+                    throw new ApplicationException($"{name} is not an array");
+                int ptr = (int)ReadVariable(name);
+                if (ptr < StackSize || ptr >= _memory.Length - sizeof(int))
+                    throw new ArgumentOutOfRangeException("nullptr");
+
+                var elemType = GetHeapObjectType(ptr);
+                if (elemType != type)
+                    throw new ArgumentException("Type missmatch while adding to array");
+
+                int elemSize = GetTypeSize(elemType);
+                int bytes = GetHeapObjectLength(ptr);
+                int oldLength = bytes / elemSize;
+                int newLength = checked(oldLength + 1);//*2?
+                int required = checked(newLength * elemSize);
+
+                int newPtr = Malloc(required, elemType);
+                _memory.AsSpan(ptr, bytes).CopyTo(_memory.AsSpan(newPtr, bytes));
+                _memory.AsSpan(newPtr + bytes, required - bytes).Clear();
+
+                WriteVariable(name, newPtr);
+                Free(ptr);
+                ptr = newPtr;
+                bytes = required;
+                int dst = ptr + oldLength * elemSize;
+                ReadOnlySpan<byte> src;
+                if (element is int i) src = BitConverter.GetBytes(i);
+                else if (element is uint ui) src = BitConverter.GetBytes(ui);
+                else if (element is long l) src = BitConverter.GetBytes(l);
+                else if (element is ulong ul) src = BitConverter.GetBytes(ul);
+                else if (element is short s) src = BitConverter.GetBytes(s);
+                else if (element is ushort us) src = BitConverter.GetBytes(us);
+                else if (element is byte b) src = new byte[] { b };
+                else if (element is sbyte sb) src = new byte[] { unchecked((byte)sb) };
+                else if (element is char c) src = BitConverter.GetBytes(c);
+                else if (element is float f) src = BitConverter.GetBytes(f);
+                else if (element is double d) src = BitConverter.GetBytes(d);
+                else if (element is decimal m)
+                {
+                    int[] bits = decimal.GetBits(m);
+                    Span<byte> tmp = stackalloc byte[16];
+                    for (int j = 0; j < 4; j++)
+                        BitConverter.GetBytes(bits[j]).CopyTo(tmp.Slice(j * 4));
+                    src = tmp.ToArray();
+                }
+                else
+                    throw new ApplicationException($"Unsupported element type {element.GetType()}");
+
+                WriteBytes(dst, src);
+            }
+            internal int AddObject(object o) => _handles.Add(o);
+            internal object? GetObject(int id) => _handles.Get(id);
+            internal void ReleaseObject(int id) => _handles.Release(id);
             #endregion
 
             #endregion
-            
+
             #region Variable pointer dictionary manager
             public void Declare(string name, ValueType type, object? value)
             {
@@ -1232,7 +1369,16 @@ namespace S_Interpretor
                 {
 
                     if (type == ValueType.Object && value is not null) type = InferType(value);
-                    if (type == ValueType.Object && value is not null) throw new ApplicationException($"Allocating variable with undefined type {value.GetType()}");
+                    if (type == ValueType.Object && value is ValueTuple<int, bool> obj)
+                    {
+                        var bytes = BitConverter.GetBytes(obj.Item1);
+                        var address = Malloc(GetTypeSize(ValueType.Object), ValueType.Object);
+                        var pointer = Stackalloc(ValueType.Object);
+                        _scopes.Peek()[name] = pointer;
+                        WriteVariable(name, address);
+                        WriteBytes(address, bytes);
+                        return;
+                    }
                     var variable = Stackalloc(type);
                     _scopes.Peek()[name] = variable;
                     if (value is not null)
@@ -1257,25 +1403,27 @@ namespace S_Interpretor
                 }
 
             }
-            public Ast.ValueType InferType(object v) => v switch
+            public Ast.ValueType InferType(object v)
             {
-                int => ValueType.Int,
-                double => ValueType.Double,
-                float => ValueType.Float,
-                bool => ValueType.Bool,
-                char => ValueType.Char,
-                long => ValueType.Long,
-                ulong => ValueType.Ulong,
-                uint => ValueType.Uint,
-                short => ValueType.Short,
-                ushort => ValueType.UShort,
-                byte => ValueType.Byte,
-                sbyte => ValueType.Sbyte,
-                decimal => ValueType.Decimal,
-                string => ValueType.String,
-                _ => ValueType.Object,
-                //_ => throw new NotSupportedException($"Cannot infer ValueType for {v.GetType()}")
-            };
+                switch (v)
+                {
+                    case int: return ValueType.Int;
+                    case double: return ValueType.Double;
+                    case float: return ValueType.Float;
+                    case decimal: return ValueType.Decimal;
+                    case uint: return ValueType.Uint;
+                    case long: return ValueType.Long;
+                    case ulong: return ValueType.Ulong;
+                    case ushort: return ValueType.UShort;
+                    case short: return ValueType.Short;
+                    case byte: return ValueType.Byte;
+                    case sbyte: return ValueType.Sbyte;
+                    case char: return ValueType.Char;
+                    case string: return ValueType.String;
+                    case bool: return ValueType.Bool;
+                    default: return ValueType.Object;
+                }
+            }
             public object Cast(object value, ValueType dest)
             {
                 static decimal ToDec(object v) => Convert.ToDecimal(v, CultureInfo.InvariantCulture);
@@ -1325,9 +1473,58 @@ namespace S_Interpretor
                 }
                 throw new Exception($"Variable '{name}' not found");
             }
+            internal static bool IsObject(object? o) => o is not null && o is not string &&
+                   o.GetType().IsValueType == false && o is not Array;
+
             #endregion
 
         }
+        #endregion
+        #region Object Handle
+        internal sealed class ObjectTable : IDisposable
+        {
+            private readonly GCHandle[] _slots;
+            private readonly Stack<int> _free;
+
+            public ObjectTable(int capacity)
+            {
+                _slots = new GCHandle[capacity];
+                _free = new Stack<int>(capacity);
+                for (int i = capacity - 1; i >= 0; --i)
+                    _free.Push(i);
+            }
+
+            public int Add(object obj)
+            {
+                if (_free.Count == 0)
+                    throw new OutOfMemoryException("Object table is full");
+
+                int slot = _free.Pop();
+                _slots[slot] = GCHandle.Alloc(obj, GCHandleType.Normal);
+                return slot;
+            }
+
+            public object? Get(int id) =>
+                (uint)id < _slots.Length && _slots[id].IsAllocated
+                   ? _slots[id].Target
+                   : null;
+
+            public void Release(int id)
+            {
+                if ((uint)id >= _slots.Length || !_slots[id].IsAllocated)
+                    return;
+
+                _slots[id].Free();
+                _free.Push(id);
+            }
+
+            public void Dispose()
+            {
+                foreach (ref var h in _slots.AsSpan())
+                    if (h.IsAllocated) h.Free();
+            }
+        }
+
         #endregion
         public ExecutionContext Context { get; }
         public AstNode? RootNode { get; private set; }
@@ -1340,15 +1537,29 @@ namespace S_Interpretor
             this.Context = new Ast.ExecutionContext(token);
         }
 
-        public void Interpret(string code, bool consoleOutput = true, bool printTree = false) //TODO string arrays, array resize, native objects, attributes, function scopes, variable caprure
+        public void Interpret(string code, bool consoleOutput = true, bool printTree = false) //TODO string arrays, attributes
         {
+            try
+            { 
             ImportStandartLibrary(consoleOutput);
             var parser = new Parser(code);
             var ast = parser.ParseProgram();
             RootNode = ast;
             if (printTree) RootNode.Print();
             RootNode.Evaluate(this.Context);
-
+            }
+            catch (OperationCanceledException)
+            {
+                if(consoleOutput) Console.WriteLine("Program timed out");
+            }
+            catch (Exception e)
+            {
+                if(consoleOutput) Console.WriteLine(e.ToString());
+            }
+            finally
+            {
+                Context.Dispose();
+            }
         }
         public enum ValueType
         {
@@ -1404,6 +1615,7 @@ namespace S_Interpretor
             BracketsClose,//]
             Comma,//,
             Question,//?
+            Dot,
         }
 
         public class OperatorInfo
@@ -1470,6 +1682,8 @@ namespace S_Interpretor
             this.Context.RegisterNative("sizeof", (object o) => { return Context.GetTypeSize(Context.InferType(o)); });
             this.Context.RegisterNative("Length", (Func<int, int>)Context.GetArrayLength);
             this.Context.RegisterNative("Count", (Func<int, int>)Context.GetArrayLength);
+            this.Context.RegisterNative("Resize", (Action<string, int>)Context.ArrayResize);
+            this.Context.RegisterNative("Add", (Action<string, object>)Context.ArrayAdd);
         }
         private static bool MatchVariableType(object value, ValueType type) => type switch
         {
@@ -1823,7 +2037,8 @@ namespace S_Interpretor
                     if (pointer is int ptr)
                     {
                         if (v.Type == ValueType.String) return Encoding.UTF8.GetString(context.GetSpan(ptr));
-                        if (v.Type == ValueType.Array) return context.ReadVariable(Name);
+                        if (v.Type == ValueType.Array) return ptr;
+                        if (v.Type == ValueType.Object) return BitConverter.ToInt32(context.GetSpan(ptr));
                         else throw new ApplicationException($"Reading object: {v.Type}");
                     }
                     else throw new ApplicationException($"non-int pointer: {pointer.GetType()}");
@@ -1881,6 +2096,7 @@ namespace S_Interpretor
 
             public override object Evaluate(ExecutionContext context)
             {
+                context.Check();
                 var len = LengthExpr.Evaluate(context);
 
                 if (len is int i) 
@@ -1907,14 +2123,14 @@ namespace S_Interpretor
                 ArrayExpr = arrayExpr;
                 IndexExpr = indexExpr;
             }
-            public override object Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext context)
             {
-                ctx.Check();
-                int basePtr = Convert.ToInt32(ArrayExpr.Evaluate(ctx));
-                int idx = Convert.ToInt32(IndexExpr.Evaluate(ctx));
+                context.Check();
+                int basePtr = Convert.ToInt32(ArrayExpr.Evaluate(context));
+                int idx = Convert.ToInt32(IndexExpr.Evaluate(context));
 
-                int addr = ElementAddress(ctx, basePtr, idx, out var vt);
-                return ctx.ReadFromStack(addr, vt);
+                int addr = ElementAddress(context, basePtr, idx, out var vt);
+                return context.ReadFromStack(addr, vt);
             }
             public void Write(ExecutionContext context, object value)
             {
@@ -1998,10 +2214,11 @@ namespace S_Interpretor
             public AstNode Expr;
             public CastNode(ValueType t, AstNode e) { Target = t; Expr = e; }
 
-            public override object Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext context)
             {
-                var val = Expr.Evaluate(ctx);
-                return ctx.Cast(val, Target);
+                context.Check();
+                var val = Expr.Evaluate(context);
+                return context.Cast(val, Target);
             }
 
             public override void Print(string indent = "", bool isLast = true)
@@ -2156,6 +2373,7 @@ namespace S_Interpretor
 
             public override object Evaluate(ExecutionContext context)
             {
+                context.Check();
                 var cond = Condition.Evaluate(context);
                 if (cond is bool b && b)
                 {
@@ -2186,11 +2404,12 @@ namespace S_Interpretor
             public ConditionalNode(AstNode cond, AstNode t, AstNode f)
             { Condition = cond; IfTrue = t; IfFalse = f; }
 
-            public override object Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext context)
             {
-                var v = Condition.Evaluate(ctx);
-                return (v is bool b && b) ? IfTrue.Evaluate(ctx)
-                                          : IfFalse.Evaluate(ctx);
+                context.Check();
+                var v = Condition.Evaluate(context);
+                return (v is bool b && b) ? IfTrue.Evaluate(context)
+                                          : IfFalse.Evaluate(context);
             }
 
             public override void Print(string indent = "", bool isLast = true)
@@ -2214,28 +2433,29 @@ namespace S_Interpretor
                 ExVar = exVar;
             }
 
-            public override object Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext context)
             {
+                context.Check();
                 try
                 {
-                    var res = TryBlock.Evaluate(ctx);
+                    var res = TryBlock.Evaluate(context);
                     return res;
                 }
                 catch (Exception ex)
                 {
-                    ctx.EnterScope();
+                    context.EnterScope();
                     try
                     {
                         if (ExVar != null)
-                            ctx.Declare(ExVar, ValueType.String, ex.Message);
-                        var res = CatchBlock.Evaluate(ctx);
+                            context.Declare(ExVar, ValueType.String, ex.Message);
+                        var res = CatchBlock.Evaluate(context);
                         return res;
                     }
-                    finally { ctx.ExitScope(); }
+                    finally { context.ExitScope(); }
                 }
                 finally
                 {
-                    if (FinallyBlock is not LiteralNode) FinallyBlock.Evaluate(ctx);
+                    if (FinallyBlock is not LiteralNode) FinallyBlock.Evaluate(context);
                 }
 
             }
@@ -2261,10 +2481,10 @@ namespace S_Interpretor
                 Cases = cases;
             }
 
-            public override object Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext context)
             {
-                var discVal = Discriminant.Evaluate(ctx);
-
+                context.Check();
+                var discVal = Discriminant.Evaluate(context);
                 bool execute = false;
                 foreach (var (valExpr, body) in Cases)
                 {
@@ -2273,14 +2493,14 @@ namespace S_Interpretor
                         if (valExpr == null) //default
                             execute = true;
                         else
-                            execute = Equals(discVal, valExpr.Evaluate(ctx));
+                            execute = Equals(discVal, valExpr.Evaluate(context));
                     }
 
                     if (execute)
                     {
                         foreach (var stmt in body)
                         {
-                            var r = stmt.Evaluate(ctx);
+                            var r = stmt.Evaluate(context);
                             if (r is BreakSignal) return null; // break from switch
                             if (r is ContinueSignal or ReturnSignal) return r;
                         }
@@ -2308,9 +2528,10 @@ namespace S_Interpretor
             public AstNode Expr;
             public ThrowNode(AstNode expr) => Expr = expr;
 
-            public override object Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext context)
             {
-                var msg = Expr.Evaluate(ctx)?.ToString();
+                context.Check();
+                var msg = Expr.Evaluate(context)?.ToString();
                 throw new Exception(msg);
             }
             public override void Print(string indent = "", bool isLast = true)
@@ -2325,6 +2546,7 @@ namespace S_Interpretor
             public override object Evaluate(ExecutionContext context)
             {
                 //для Goto
+                context.Check();
                 return null;
             }
             public override void Print(string indent = "", bool isLast = true)
@@ -2400,7 +2622,7 @@ namespace S_Interpretor
             {
                 //lables map
                 var labels = new Dictionary<string, int>();
-                for (int i = 0; i < Statements.Count; i++)
+                for (int i = 0; i < Statements.Count && i<1024; i++)
                 {
                     if (Statements[i] is LabelNode label)
                         labels[label.Name] = i;
@@ -2409,7 +2631,7 @@ namespace S_Interpretor
                 context.Labels = labels;
 
                 //main cycle
-                int ip = 0; // instruction pointer
+                int ip = 0;
                 while (ip < Statements.Count)
                 {
                     context.Check();
@@ -2419,7 +2641,7 @@ namespace S_Interpretor
                     if (node is GotoNode gotoNode)
                     {
                         if (!labels.TryGetValue(gotoNode.TargetLabel, out var newIp))
-                            throw new Exception($"Label '{gotoNode.TargetLabel}' not found");
+                            throw new Exception($"Label {gotoNode.TargetLabel} not found");
                         ip = newIp;
                     }
                     else
@@ -2453,13 +2675,14 @@ namespace S_Interpretor
 
             public override object Evaluate(ExecutionContext context)
             {
+                context.Check();
                 context.EnterScope();
-
                 try
                 {
                     object result = null;
                     foreach (var statement in Statements)
                     {
+                        context.Check();
                         var res = statement.Evaluate(context);
                         if (res is ReturnSignal or BreakSignal or ContinueSignal) return res;
                     }
@@ -2502,9 +2725,10 @@ namespace S_Interpretor
             public FunctionDeclarationNode(ValueType? ret, string name, string[] @params, ValueType[] types, Ast.AstNode body)
             { ReturnType = ret; Name = name; Params = @params; ParamTypes = types; Body = body; }
 
-            public override object Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext context)
             {
-                ctx.AddFunction(Name, new ExecutionContext.Function
+                context.Check();
+                context.AddFunction(Name, new ExecutionContext.Function
                 {
                     ReturnType = ReturnType ?? ValueType.Object,
                     ParamNames = Params,
@@ -2528,7 +2752,7 @@ namespace S_Interpretor
             public CallNode(string name, AstNode[] args) { Name = name; Args = args; }
             public override object Evaluate(ExecutionContext ctx)
             {
-
+                ctx.Check();
                 if (ctx.NativeFunctions.TryGetValue(Name, out var overloads))
                 {
                     var argVals = Args.Select(a => a.Evaluate(ctx)).ToArray();
@@ -2545,7 +2769,15 @@ namespace S_Interpretor
                             {
                                 var need = pars[i].ParameterType;
                                 var have = argVals[i];
-
+                                if (have is int hid && need != typeof(int))
+                                {
+                                    var real = ctx.GetObject(hid);
+                                    if (real is not null && need.IsInstanceOfType(real))
+                                    {
+                                        conv[i] = real;
+                                        continue;
+                                    }
+                                }
                                 if (have == null && need.IsClass) { conv[i] = null; continue; }
 
                                 if (need.IsInstanceOfType(have))
@@ -2560,7 +2792,13 @@ namespace S_Interpretor
                             }
                             if (!ok) continue;
 
-                            return del.DynamicInvoke(conv);
+                            object? ret = del.DynamicInvoke(conv);
+                            if (ExecutionContext.IsObject(ret))
+                            {
+                                int id = ctx.AddObject(ret);
+                                return (id, isObject: true);
+                            }
+                            return ret;
                         }
                         catch { }
                         finally { ctx.ExitFunction(); }
