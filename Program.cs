@@ -1058,8 +1058,8 @@
                     case ValueType.Array: return sizeof(int);
                     case ValueType.Object: return sizeof(int);
                     case ValueType.IntPtr: return sizeof(int);
-                    case ValueType.Uint: return sizeof(int);
-                    case ValueType.Long: return sizeof(uint);
+                    case ValueType.Uint: return sizeof(uint);
+                    case ValueType.Long: return sizeof(long);
                     case ValueType.Ulong: return sizeof(ulong);
                     case ValueType.Double: return sizeof(double);
                     case ValueType.Float: return sizeof(float);
@@ -1684,6 +1684,13 @@
             this.Context.RegisterNative("Count", (Func<int, int>)Context.GetArrayLength);
             this.Context.RegisterNative("Resize", (Action<string, int>)Context.ArrayResize);
             this.Context.RegisterNative("Add", (Action<string, object>)Context.ArrayAdd);
+	    this.Context.RegisterNative("Pow", (Func<double, double, double>)Math.Pow);
+	    this.Context.RegisterNative("IsDigit", (char c) => { return char.IsDigit(c); });
+	    this.Context.RegisterNative("IsLetter", (char c) => { return char.IsLetter(c); });
+	    this.Context.RegisterNative("Numeric", (string str) => { return int.TryParse(str, out _); });
+  	    this.Context.RegisterNative("IsNumber", (string str) => { return double.TryParse(str, out _); });
+	    this.Context.RegisterNative("UtcNow", () => { return DateTime.UtcNow.ToString(); });
+	    this.Context.RegisterNative("TimeNow", () => { return DateTime.Now.ToString(); });
         }
         private static bool MatchVariableType(object value, ValueType type) => type switch
         {
@@ -2167,7 +2174,8 @@
                 }
                 else throw new ApplicationException($"Unknown type while writing to array index: {value.GetType()}");
 
-                context.WriteBytes(addr, src);
+                context.ValidateAddress(addr, src.Length);
+		src.CopyTo(context.RawMemory.AsSpan(addr, src.Length));
             }
             int ElementAddress(ExecutionContext ctx, int basePtr, int index, out ValueType elemType)
             {
