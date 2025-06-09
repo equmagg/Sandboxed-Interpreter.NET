@@ -399,6 +399,25 @@
                     case "void": return ParseFunctionDeclaration(isVoid: true);
                 }
             }
+            //attribute?
+            if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
+            {
+                var attrs = ParseAttributeList();
+
+                //expect function delaration
+                if (_lexer.CurrentTokenText == "void" || IsTypeKeyword(_lexer.CurrentTokenText))
+                {
+                    bool isVoid = _lexer.CurrentTokenText == "void";
+                    string? retType = isVoid ? null : _lexer.CurrentTokenText;
+                    if (!isVoid) _lexer.NextToken();//skip type
+
+                    var func = (Ast.FunctionDeclarationNode)ParseFunctionDeclaration(isVoid, retType, attrs: attrs);
+
+                    return func;
+                }
+
+                throw new ApplicationException("Attributes are only allowed before function declaration");
+            }
             //expect declaration
             if (IsTypeKeyword(_lexer.CurrentTokenText) && !int.TryParse(_lexer.CurrentTokenText, out _))
             {
@@ -676,7 +695,7 @@
         }
         #endregion
         #region Function parser
-        private Ast.AstNode ParseFunctionDeclaration(bool isVoid = false, string? returnTypeText = null, string? name = null)
+        private Ast.AstNode ParseFunctionDeclaration(bool isVoid = false, string? returnTypeText = null, string? name = null, IList<Ast.AttributeNode>? attrs = null)
         {
             Ast.ValueType? retType = isVoid ? null :
                 Enum.Parse<Ast.ValueType>(returnTypeText!, ignoreCase: true);
@@ -730,6 +749,58 @@
                 expr = ParseExpression();
             Consume(Ast.TokenType.Semicolon);
             return new Ast.ReturnNode(expr);
+        }
+        private List<Ast.AttributeNode> ParseAttributeList()
+        {
+            var list = new List<Ast.AttributeNode>();
+
+            while (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
+            {
+                Consume(Ast.TokenType.BracketsOpen);
+
+                do//inside []
+                {
+                    var name = _lexer.CurrentTokenText;
+                    Consume(Ast.TokenType.Identifier);//skip attribute name
+
+                    var args = new List<string>();
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
+                    {
+                        Consume(Ast.TokenType.ParenOpen);
+                        if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                        {
+                            do
+                            {
+                                if (_lexer.CurrentTokenType != Ast.TokenType.String)
+                                    throw new NotImplementedException("Attribute params should be strings");
+
+                                args.Add(_lexer.CurrentTokenText);
+                                _lexer.NextToken();//skip string
+
+                                if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                { _lexer.NextToken(); continue; }
+                                break;
+                            }
+                            while (true);
+                        }
+                        Consume(Ast.TokenType.ParenClose);
+                    }
+
+                    list.Add(new Ast.AttributeNode(name, args.ToArray()));
+
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                    {
+                        _lexer.NextToken();
+                        continue;
+                    }
+                    break;
+                }
+                while (true);
+
+                Consume(Ast.TokenType.BracketsClose);
+                //repeat if more attributes
+            }
+            return list;
         }
         #endregion
         #region Flow Control parser
@@ -928,6 +999,7 @@
                 public string[] ParamNames;
                 public ValueType[] ParamTypes;
                 public AstNode Body;
+                public AttributeNode[] Attributes;
             }
             public ExecutionContext(CancellationToken token, int size = 1024 * 4, int stackSize = 1024 * 1)
             {
@@ -1007,6 +1079,7 @@
                 ValidateAddress(addr, GetTypeSize(vt));
                 return typeReaders[vt](_memory, addr);
             }
+            public object ReadFromMemorySlice(byte[] memory, ValueType vt) => typeReaders[vt](memory, 0);
             public void EnterScope()
             {
                 _memoryOffsets.Push(_allocPointer);
@@ -1537,7 +1610,7 @@
             this.Context = new Ast.ExecutionContext(token);
         }
 
-        public void Interpret(string code, bool consoleOutput = true, bool printTree = false) //TODO string arrays, attributes
+        public void Interpret(string code, bool consoleOutput = true, bool printTree = false)
         {
             try
             { 
@@ -1684,14 +1757,21 @@
             this.Context.RegisterNative("Count", (Func<int, int>)Context.GetArrayLength);
             this.Context.RegisterNative("Resize", (Action<string, int>)Context.ArrayResize);
             this.Context.RegisterNative("Add", (Action<string, object>)Context.ArrayAdd);
-	    this.Context.RegisterNative("Pow", (Func<double, double, double>)Math.Pow);
-	    this.Context.RegisterNative("IsDigit", (char c) => { return char.IsDigit(c); });
-	    this.Context.RegisterNative("IsLetter", (char c) => { return char.IsLetter(c); });
-	    this.Context.RegisterNative("Numeric", (string str) => { return int.TryParse(str, out _); });
-  	    this.Context.RegisterNative("IsNumber", (string str) => { return double.TryParse(str, out _); });
-	    this.Context.RegisterNative("UtcNow", () => { return DateTime.UtcNow.ToString(); });
-	    this.Context.RegisterNative("TimeNow", () => { return DateTime.Now.ToString(); });
+            this.Context.RegisterNative("Pow", (Func<double, double, double>)Math.Pow);
+            this.Context.RegisterNative("IsDigit", (char c) => { return char.IsDigit(c); });
+            this.Context.RegisterNative("IsLetter", (char c) => { return char.IsLetter(c); });
+            this.Context.RegisterNative("Numeric", (string str) => { return int.TryParse(str, out _); });
+            this.Context.RegisterNative("IsNumber", (string str) => { return double.TryParse(str, out _); });
+            this.Context.RegisterNative("Join", (Func<string, string, string>)Join);
+            this.Context.RegisterNative("Join", (char separator, int varaiable) => { return Join(separator.ToString(), varaiable); });
+            this.Context.RegisterNative("Join", (int varaiable, string separator) => { return Join(separator, varaiable); });
+            this.Context.RegisterNative("Join", (int varaiable) => { return Join(", ", varaiable); });
+            this.Context.RegisterNative("UtcNow", () => { return DateTime.UtcNow.ToString(); });
+            this.Context.RegisterNative("TimeNow", () => { return DateTime.Now.ToString(); });
+            this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object packedCallArgs)
+                => InvokeByAttribute(this.Context, attr, attrArgs, packedCallArgs));
         }
+        #region Helpers
         private static bool MatchVariableType(object value, ValueType type) => type switch
         {
             ValueType.Int => value is int,
@@ -1730,7 +1810,77 @@
             ValueType.IntPtr => false,
             _ => true
         };
+        private string Join(string separator, string arrayName)
+        {
+            var varInfo = Context.Get(arrayName);
+            if (varInfo.Type != ValueType.Array)
+                throw new ApplicationException($"{arrayName} is not an array");
+            int ptr = (int)Context.ReadVariable(arrayName);
+            return Join(separator, ptr);
+        }
+        private string Join(string separator, int ptr)
+        {
+            if (ptr < Context.StackSize || ptr >= Context.RawMemory.Length - sizeof(int))
+                throw new ArgumentOutOfRangeException("nullptr");
+            var elemType = Context.GetHeapObjectType(ptr);
+            int elemSize = Context.GetTypeSize(elemType);
+            int bytes = Context.GetHeapObjectLength(ptr);
+            var sb = new StringBuilder();
+            for (int offset = 0; offset < bytes; offset += elemSize)
+            {
+                if (offset > 0)
+                    sb.Append(separator);
 
+                var slice = Context.ReadFromMemorySlice(
+                                Context.RawMemory[(ptr + offset)..(ptr + offset + elemSize)],
+                                elemType);
+                sb.Append(slice?.ToString() ?? string.Empty);
+            }
+            return sb.ToString();
+
+        }
+        private bool HasAttribute(Ast.ExecutionContext.Function fn, string name, string[] args)
+            => fn.Attributes.Any(a => a.Name == name && a.Args.Length == args.Length && a.Args.SequenceEqual(args, StringComparer.Ordinal));
+        private object?[] Unpack(object packed) => packed switch
+        {
+            object?[] arr => arr,
+            //ValueTuple<int, bool> vt => ,
+            _ => Array.Empty<object?>()
+        };
+        public object? InvokeByAttribute(Ast.ExecutionContext ctx, string attrName, string[] attrArgs, object callArgsPacked)
+        {
+            //string[] attrArgs = Unpack(attrArgsPacked).Select(o => o?.ToString() ?? "").ToArray();
+            object?[] callArgs = Unpack(callArgsPacked);
+            var candidate = ctx.Functions.SelectMany(kv => kv.Value).FirstOrDefault(f => HasAttribute(f, attrName, attrArgs));
+
+            if (candidate.ParamNames.Length != callArgs.Length)
+                throw new Exception($"Function signature missmatch ({candidate.ParamNames.Length}) params");
+
+            ctx.Check();
+            ctx.EnterFunction();
+            ctx.EnterScope();
+            try
+            {
+                for (int i = 0; i < callArgs.Length; i++)
+                {
+                    object? arg = callArgs[i];
+                    var needType = candidate.ParamTypes[i];
+
+                    if (!Ast.MatchVariableType(arg, needType) && needType != Ast.ValueType.Object)
+                        arg = ctx.Cast(arg!, needType);
+
+                    ctx.Declare(candidate.ParamNames[i], needType, arg);
+                }
+                var res = candidate.Body.Evaluate(ctx);
+                return res is Ast.ReturnSignal r ? r.Value : res;
+            }
+            finally
+            {
+                ctx.ExitScope();
+                ctx.ExitFunction();
+            }
+        }
+        #endregion
         public class Variable
         {
             public ValueType Type { get; }
@@ -2175,7 +2325,7 @@
                 else throw new ApplicationException($"Unknown type while writing to array index: {value.GetType()}");
 
                 context.ValidateAddress(addr, src.Length);
-		src.CopyTo(context.RawMemory.AsSpan(addr, src.Length));
+		        src.CopyTo(context.RawMemory.AsSpan(addr, src.Length));
             }
             int ElementAddress(ExecutionContext ctx, int basePtr, int index, out ValueType elemType)
             {
@@ -2723,6 +2873,7 @@
         #endregion
 
         #region Function nodes
+        public sealed record AttributeNode(string Name, string[] Args);
         public class FunctionDeclarationNode : Ast.AstNode
         {
             public ValueType? ReturnType; //null is void
@@ -2730,8 +2881,9 @@
             public string[] Params;
             public ValueType[] ParamTypes;
             public Ast.AstNode Body;
-            public FunctionDeclarationNode(ValueType? ret, string name, string[] @params, ValueType[] types, Ast.AstNode body)
-            { ReturnType = ret; Name = name; Params = @params; ParamTypes = types; Body = body; }
+            public IReadOnlyList<AttributeNode> Attributes { get; }
+            public FunctionDeclarationNode(ValueType? ret, string name, string[] @params, ValueType[] types, Ast.AstNode body, IList<AttributeNode>? attrs = null)
+            { ReturnType = ret; Name = name; Params = @params; ParamTypes = types; Body = body; Attributes = attrs?.ToArray() ?? Array.Empty<AttributeNode>(); }
 
             public override object Evaluate(ExecutionContext context)
             {
@@ -2741,15 +2893,17 @@
                     ReturnType = ReturnType ?? ValueType.Object,
                     ParamNames = Params,
                     ParamTypes = ParamTypes,
-                    Body = Body
+                    Body = Body,
+                    Attributes = this.Attributes.ToArray(),
                 });
                 return null;
             }
             public override void Print(string indent = "", bool isLast = true)
             {
+                foreach (var a in Attributes)
+                    Console.WriteLine($"{indent}├── [{a.Name}({string.Join(",", a.Args)})]");
                 Console.WriteLine($"{indent}└── function {Name}({string.Join(", ", Params)})");
-                string childIndent = indent + (isLast ? "    " : "│   ");
-                Body.Print(childIndent, false);
+                Body.Print(indent + (isLast ? "    " : "│   "), true);
             }
 
         }
@@ -2811,7 +2965,7 @@
                         catch { }
                         finally { ctx.ExitFunction(); }
                     }
-                    throw new Exception($"No native overload '{Name}' matches given arguments ({argVals.Length})");
+                    throw new Exception($"No native overload '{Name}' matches given arguments ({string.Join(", ", argVals.Select(x => x.GetType().ToString()))})");
                 }
 
                 if (!ctx.Functions.TryGetValue(Name, out var overloads2))
