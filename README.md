@@ -7,8 +7,8 @@ Should be safe to use with untrusted code.
 
 ## Features
 
-- Compatible with most of C# syntax apart from classes, structures, and a standart library.
-- All of memory is isolated internally within a byte array.
+- Compatible with most of C# syntax apart from classes, generics, some struct syntax, and a standart library.
+- All of memory is isolated internally within a byte array with concrete limits.
 - All of the code can be timed out, avoiding infinite loops and CPU pressure.
 - Recursion depth, scopes, variable declarations and more are strictly limited to secure the host.
 - None of the internal methods can access native objects, or host resourses, unless explicily declared by the host.
@@ -28,7 +28,7 @@ using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
 
 ### Create native interface
 You can access your native application exclusively through delegates.
-Here is an example of creating an interface for Discord.NET to use interpretor for command execution.
+Here is an example of creating an interface for Discord.NET to use an interpretor for command execution.
 ```cs
 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
 {

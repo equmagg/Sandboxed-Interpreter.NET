@@ -2,7 +2,6 @@
 {
     using System;
     using System.Globalization;
-    using System.Reactive;
     using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
     using System.Text;
@@ -34,7 +33,7 @@
             public int GetCodeLength() => _text.Length;
             public char GetAtPosition(int pos) => _text[pos];
             public Ast.TokenType CurrentTokenType { get; private set; }
-            public string CurrentTokenText { get; private set; }
+            public string CurrentTokenText { get; private set; } = string.Empty;
 
             private static readonly Dictionary<string, Ast.OperatorToken> OperatorMap = new()
             {
@@ -89,7 +88,6 @@
             { "[", Ast.TokenType.BracketsOpen },
             { "?[", Ast.TokenType.BracketsOpen },
             { "]", Ast.TokenType.BracketsClose },
-            { "=", Ast.TokenType.Equals },
             { ",", Ast.TokenType.Comma },
             { "?", Ast.TokenType.Question },
             { ".", Ast.TokenType.Dot },
@@ -99,9 +97,9 @@
 
             private static readonly HashSet<string> Keywords = new() { "int", "string", "char", "byte", "float", "long", "ulong", "uint", "bool", "double", "IntPtr", "intPtr", "object",
             "if", "goto", "for", "while", "do", "void","return", "break","continue","try","catch", "switch", "case", "finally" , "var", "default", "throw", "else", "new", "foreach", "in",
-            "using", "struct", "class", "checked", "unchecked", "out", "const", "enum", "ref", "private", "public", "protected", "this", "static", "abstract", "interface", "delegate", "as",
-            "internal", "unsafe", "sealed", "virtual", "override", "partial", "readonly", "params", "lock", "implicit", "explicit", "fixed", "extern", "operator", "namespace", "event", "base",
-            "is", "and", "or", "not", "async", "await", "volatile", "yield", "record" };
+            "using", "struct", "class", "checked", "unchecked", "out", "const", "enum", "ref", "private", "public", "protected", "static", "abstract", "interface", "delegate", "as", "base",
+            "internal", "unsafe", "sealed", "virtual", "override", "partial", "readonly", "params", "lock", "implicit", "explicit", "fixed", "extern", "operator", "namespace", "event", "is",
+            "and", "or", "not", "async", "await", "volatile", "yield", "record" };
             public void ResetCurrent(int pos, Ast.TokenType token, string text)
             {
                 _position = pos;
@@ -333,6 +331,16 @@
             if (PeekPointerMark()) { _lexer.NextToken(); return Ast.ValueType.IntPtr; }
             return baseType;
         }
+        private Ast.ValueType ReadMaybeNullable(Ast.ValueType vt)
+        {
+            if (_lexer.CurrentTokenType == Ast.TokenType.Question)
+            {
+                _lexer.NextToken();//skip ?
+                return Ast.ValueType.Nullable;
+            }
+            return vt;
+        }
+
         private bool IsPostfixUnary(Ast.OperatorToken token, Ast.OperatorInfo info)
             => info.Associativity == Ast.Associativity.Right && (token == Ast.OperatorToken.Increment || token == Ast.OperatorToken.Decrement);
 
@@ -474,6 +482,32 @@
                         if (_lexer.CurrentTokenType != Ast.TokenType.ParenOpen) looksLikeFunc = false;
                         _lexer.ResetCurrent(savePos, saveType, saveText);
                         if (looksLikeFunc) { _lexer.NextToken(); return ParseFunctionDeclaration(isVoid, retType, fnMods: mods ); }
+                        else if (LooksLikeStructureDeclaration()) 
+                        {
+                            string structTypeName = _lexer.CurrentTokenText;
+                            _lexer.NextToken();//skip type
+                            string name = _lexer.CurrentTokenText;
+                            Consume(Ast.TokenType.Identifier);
+                            Consume(Ast.TokenType.Operator);
+                            Ast.AstNode expr;
+                            if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new")
+                            {
+                                // Посмотрим, это target-typed new?
+                                int p = _lexer.Position; var t = _lexer.CurrentTokenType; var s = _lexer.CurrentTokenText;
+                                _lexer.NextToken();
+                                bool target = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
+                                _lexer.ResetCurrent(p, t, s);
+
+                                expr = target ? ParseTargetTypedNew(structTypeName) : ParseExpression();
+                            }
+                            else expr = ParseExpression();
+                            Consume(Ast.TokenType.Semicolon);
+                            bool isPublic = mods is not null && mods.Contains("public");
+                            if (mods != null)
+                                name = string.IsNullOrEmpty(_currentNamespace) ? name : $"{_currentNamespace}.{name}";
+                            return new Ast.VariableDeclarationNode(
+                                Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null);
+                        }
                         else return ParseDeclaration(mods);
                     }
                 }
@@ -519,6 +553,31 @@
 
                 throw new ApplicationException("Attributes are only allowed before function declaration");
             }
+            if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+            {
+                if (LooksLikeStructureDeclaration())
+                {
+                    string structTypeName = _lexer.CurrentTokenText;
+                    _lexer.NextToken();//skip type
+                    string name = _lexer.CurrentTokenText;
+                    Consume(Ast.TokenType.Identifier);
+                    Consume(Ast.TokenType.Operator);
+                    Ast.AstNode expr;
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new")
+                    {
+                        int p = _lexer.Position; var t = _lexer.CurrentTokenType; var s = _lexer.CurrentTokenText;
+                        _lexer.NextToken();
+                        bool target = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
+                        _lexer.ResetCurrent(p, t, s);
+
+                        expr = target ? ParseTargetTypedNew(structTypeName) : ParseExpression();
+                    }
+                    else expr = ParseExpression();
+                    Consume(Ast.TokenType.Semicolon);
+                    return new Ast.VariableDeclarationNode( 
+                        Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null );
+                }
+            }
             //expect declaration
             if (IsTypeKeyword(_lexer.CurrentTokenText) && !int.TryParse(_lexer.CurrentTokenText, out _))
             {
@@ -550,6 +609,98 @@
             Consume(Ast.TokenType.Semicolon);
             return exprStatement;
         }
+        #region Struct helpers
+        private bool LooksLikeStructConstructor(string structName)
+        {
+            int savePos = _lexer.Position;
+            var saveType = _lexer.CurrentTokenType;
+            var saveText = _lexer.CurrentTokenText;
+
+            while (IsStructModifier())
+                _lexer.NextToken();
+
+            if (!(_lexer.CurrentTokenType == Ast.TokenType.Identifier && _lexer.CurrentTokenText == structName))
+            {
+                _lexer.ResetCurrent(savePos, saveType, saveText);
+                return false;
+            }
+            _lexer.NextToken();//skip struct name
+
+            bool looks = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
+            _lexer.ResetCurrent(savePos, saveType, saveText);
+            return looks;
+        }
+        private bool LooksLikeStructureDeclaration(List<string>? mods = null)
+        {
+            int savePos = _lexer.Position;
+            var saveType = _lexer.CurrentTokenType;
+            var saveText = _lexer.CurrentTokenText;
+
+            if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+                return false;
+
+            _lexer.NextToken();//skip type
+
+            if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+            {
+                _lexer.ResetCurrent(savePos, saveType, saveText);
+                return false;
+            }
+
+            string varName = _lexer.CurrentTokenText;
+            _lexer.NextToken();//skip name
+
+            if (_lexer.CurrentTokenText != "=")
+            {
+                _lexer.ResetCurrent(savePos, saveType, saveText);
+                return false;
+            }
+            _lexer.NextToken();//skip =
+            if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new"))
+            {
+                _lexer.ResetCurrent(savePos, saveType, saveText);
+                return false;
+            }
+            _lexer.NextToken();//skip new
+            if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+            {
+                if(_lexer.CurrentTokenText != saveText)
+                {
+                    _lexer.ResetCurrent(savePos, saveType, saveText); 
+                    return false;
+                }
+                _lexer.NextToken();//skip struct name
+                bool ok = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
+                _lexer.ResetCurrent(savePos, saveType, saveText);
+                return ok;
+            }
+            bool looksTargetTyped = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
+            _lexer.ResetCurrent(savePos, saveType, saveText);
+            return looksTargetTyped;
+        }
+        private Ast.NewStructNode ParseTargetTypedNew(string structName)
+        {
+            if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new"))
+                throw new ApplicationException("Expected 'new'");
+
+            _lexer.NextToken(); //skip new
+            Consume(Ast.TokenType.ParenOpen);
+
+            var args = new List<Ast.AstNode>();
+            if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+            {
+                do
+                {
+                    args.Add(ParseExpression());
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                    break;
+                } while (true);
+            }
+            Consume(Ast.TokenType.ParenClose);
+
+            return new Ast.NewStructNode(structName, args.ToArray());
+        }
+        #endregion
         private Ast.AstNode ParseDeclaration(List<string>? mods = null)
         {
             bool IsPublic = mods is null ? false : mods.Contains("public");
@@ -558,12 +709,16 @@
             _lexer.NextToken();
             var baseType = isVar ? Ast.ValueType.Object : Enum.Parse<Ast.ValueType>(typeStr, true);
             var declarations = new List<Ast.AstNode>();
-
+            var innerType = baseType;
             while (true)
             {
 
                 (bool isArr, int?[] dims) arrayInfo = ReadArraySuffixes();
-                if (!isVar) baseType = ReadMaybePointer(baseType);
+                if (!isVar) 
+                { 
+                    baseType = ReadMaybePointer(baseType); 
+                    baseType = ReadMaybeNullable(baseType); 
+                }
                 var name = _lexer.CurrentTokenText;
                 if (mods != null)
                 {
@@ -581,8 +736,8 @@
                 else if (isVar)
                     throw new ApplicationException("Variable declared with 'var' must have an initializer");
                 Ast.AstNode node = (!isVar && arrayInfo.isArr)
-                    ? new Ast.VariableDeclarationNode(baseType, name, expr, isArray: true, arrayInfo.dims, isPublic: IsPublic)
-                    : new Ast.VariableDeclarationNode(baseType, name, expr, isPublic: IsPublic);
+                    ? new Ast.VariableDeclarationNode(baseType, name, expr, isArray: true, arrayInfo.dims, isPublic: IsPublic, innerType: null)
+                    : new Ast.VariableDeclarationNode(baseType, name, expr, isPublic: IsPublic, innerType: innerType != baseType ? innerType : null);
                 declarations.Add(node);
 
                 if (_lexer.CurrentTokenType != Ast.TokenType.Comma)
@@ -619,7 +774,7 @@
                 _constScopes.Peek()[name] = lit;
             else
                 return new Ast.VariableDeclarationNode( Enum.Parse<Ast.ValueType>(typeTok, true), 
-                    name, init, isArray: false, isConst: true);
+                    name, init, isArray: false, isConst: true, isPublic: false, innerType: null);
 
             return new Ast.EmptyNode();
 
@@ -726,7 +881,7 @@
                 if (_lexer.CurrentTokenType != Ast.TokenType.Operator) break;
                 var opToken = _lexer.ParseOperator();
                 if (!Ast.TryGetOperatorInfo(opToken, out var opInfo)) break;
-                if (opInfo.Precedence < parentPrecedence) break;
+                if (opInfo!.Precedence < parentPrecedence) break;
                 if (IsPostfixUnary(opToken, opInfo))
                 {
                     _lexer.NextToken();
@@ -798,6 +953,7 @@
                     var vt = Enum.Parse<Ast.ValueType>(_lexer.CurrentTokenText, true);
                     _lexer.NextToken(); //skip type
                     vt = ReadMaybePointer(vt);
+                    vt = ReadMaybeNullable(vt);
                     Consume(Ast.TokenType.ParenClose);
                     return new Ast.CastNode(vt, ParseUnary());
                 }
@@ -819,7 +975,26 @@
                     if (_lexer.CurrentTokenText == "new")
                     {
                         _lexer.NextToken(); //skip new
+                        if(_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+                        {
+                            string structName = _lexer.CurrentTokenText;
+                            _lexer.NextToken();
+                            Consume(Ast.TokenType.ParenOpen);
+                            var args = new List<Ast.AstNode>();
+                            if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                            {
+                                do
+                                {
+                                    args.Add(ParseExpression());
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                    { _lexer.NextToken(); continue; }
+                                    break;
+                                } while (true);
+                            }
+                            Consume(Ast.TokenType.ParenClose);
 
+                            return new Ast.NewStructNode(structName, args.ToArray());
+                        }
                         if (!IsTypeKeyword(_lexer.CurrentTokenText))
                             throw new ApplicationException("Expected type after 'new'");
 
@@ -1104,7 +1279,8 @@
                     {
                         pType = Enum.Parse<Ast.ValueType>(_lexer.CurrentTokenText, true);
                         _lexer.NextToken(); //skip time
-                        pType = ReadMaybePointer(pType);//ptr*?
+                        pType = ReadMaybePointer(pType);//ptr*
+                        pType = ReadMaybeNullable(pType);//ptr?
                         var arrInfo = ReadArraySuffixes();
                         if (arrInfo.isArray)
                             pType = Ast.ValueType.Array;
@@ -1226,6 +1402,7 @@
                         _lexer.NextToken(); //skip type
 
                         pType = ReadMaybePointer(pType);
+                        pType = ReadMaybeNullable(pType);
                         var arrInfo = ReadArraySuffixes();
                         if (arrInfo.isArray) pType = Ast.ValueType.Array;
                     }
@@ -1270,6 +1447,101 @@
 
         #endregion
         #region Structure objects parser
+        private Ast.AstNode ParseStructConstructor(string structName)
+        {
+            var mods = new List<string>();
+            while (IsStructModifier())
+            {
+                mods.Add(_lexer.CurrentTokenText);
+                _lexer.NextToken();
+            }
+
+            string ident = _lexer.CurrentTokenText;
+            Consume(Ast.TokenType.Identifier);
+            if (!string.Equals(ident, structName, StringComparison.Ordinal))
+                throw new ApplicationException($"Ожидается конструктор '{structName}'.");
+
+            //params
+            Consume(Ast.TokenType.ParenOpen);
+            var paramNames = new List<string>();
+            var paramTypes = new List<Ast.ValueType>();
+            var defaultVals = new List<Ast.AstNode?>();
+
+            if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+            {
+                do
+                {
+                    var pType = Ast.ValueType.Object;
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText))
+                    {
+                        pType = Enum.Parse<Ast.ValueType>(_lexer.CurrentTokenText, true);
+                        _lexer.NextToken(); //skip type
+                        pType = ReadMaybePointer(pType);
+                        pType = ReadMaybeNullable(pType);
+                        var arrInfo = ReadArraySuffixes();
+                        if (arrInfo.isArray) pType = Ast.ValueType.Array;
+                    }
+
+                    var pname = _lexer.CurrentTokenText;
+                    Consume(Ast.TokenType.Identifier);
+                    paramNames.Add(pname);
+                    paramTypes.Add(pType);
+
+                    Ast.AstNode? def = null;
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=")
+                    {
+                        _lexer.NextToken();
+                        def = ParseExpression();
+                    }
+                    defaultVals.Add(def);
+
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                    break;
+                }
+                while (true);
+            }
+            Consume(Ast.TokenType.ParenClose);
+
+            //this or base?
+            Ast.ConstructorDeclarationNode.Initializer? init = null;
+            if (_lexer.CurrentTokenType == Ast.TokenType.Colon)
+            {
+                _lexer.NextToken(); // ':'
+                if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword || _lexer.CurrentTokenType == Ast.TokenType.Identifier))
+                    throw new ApplicationException("Ожидается 'this' или 'base' после ':'");
+                string kind = _lexer.CurrentTokenText; //this or base
+                _lexer.NextToken();
+                Consume(Ast.TokenType.ParenOpen);
+                var args = new List<Ast.AstNode>();
+                if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                {
+                    do
+                    {
+                        args.Add(ParseExpression());
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                        break;
+                    } while (true);
+                }
+                Consume(Ast.TokenType.ParenClose);
+                init = new Ast.ConstructorDeclarationNode.Initializer(kind, args.ToArray());
+            }
+
+
+            Ast.AstNode body;
+            if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=>")
+            {
+                _lexer.NextToken(); //skip =>
+                var expr = ParseExpression();
+                Consume(Ast.TokenType.Semicolon);
+                body = expr;
+            }
+            else
+            {
+                body = _lexer.CurrentTokenType == Ast.TokenType.BraceOpen ? ParseBlock() : ParseStatement();
+            }
+
+            return new Ast.ConstructorDeclarationNode(structName, paramNames.ToArray(), paramTypes.ToArray(), defaultVals.ToArray(), body, mods, init);
+        }
         private Ast.AstNode ParseClassDeclaration(IList<string>? mods = null)
         {
             _lexer.NextToken(); // skip class
@@ -1334,7 +1606,10 @@
             var members = new List<Ast.AstNode>();
             while (_lexer.CurrentTokenType != Ast.TokenType.BraceClose)
             {
-                members.Add(ParseStatement());
+                if (LooksLikeStructConstructor(name))
+                    members.Add(ParseStructConstructor(name));
+                else
+                    members.Add(ParseStatement());
             }
             Consume(Ast.TokenType.BraceClose);
             return new Ast.StructDeclarationNode(name, mods ?? Array.Empty<string>(), members);
@@ -1716,6 +1991,7 @@
             private int _heapend = 0;
             private int _allocPointer = 0;
             private int _callDepth = 0;
+            private ulong _operationsCount = 0;
             public readonly Dictionary<string, List<Function>> Functions = new();
             public readonly Dictionary<string, List<Delegate>> NativeFunctions = new();
             public readonly HashSet<string> Usings = new();
@@ -1724,6 +2000,7 @@
             public CancellationToken CancellationToken { get; }
             public byte[] RawMemory => _memory;
             public int UsedMemory => _allocPointer;
+            public int MemoryUsed => _heapend;
             private string _currentNameSpace = "";
             public string CurrentNameSpace { get { return _currentNameSpace; } set { if(value.Length < 200) _currentNameSpace = value; } }
             public struct Function
@@ -1775,6 +2052,8 @@
                 int vars = 0;
                 foreach (var scope in _scopes) vars += scope.Count;
                 if (vars > 2048) throw new OutOfMemoryException($"Too many declarations, danger of host memory ddos");
+                _operationsCount++;
+                if (_operationsCount > 100_000_000) throw new OutOfMemoryException($"Too many operations");
             }
             #region Memory manager
             public string PrintMemory(int bytesPerRow = 16, int dataPreview = 64, bool printStack = false)
@@ -1838,6 +2117,8 @@
                 { Ast.ValueType.String, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Object, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Enum, (heap, offset) => BitConverter.ToInt32(heap, offset) },
+                { Ast.ValueType.Struct, (heap, offset) => BitConverter.ToInt32(heap, offset) },
+                { Ast.ValueType.Nullable, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Bool, (heap, offset) => heap[offset] != 0 },
                 { Ast.ValueType.Float, (heap, offset) => BitConverter.ToSingle(heap, offset) },
                 { Ast.ValueType.Double, (heap, offset) => BitConverter.ToDouble(heap, offset) },
@@ -1845,11 +2126,13 @@
                 { Ast.ValueType.Long, (heap, offset) => BitConverter.ToInt64(heap, offset) },
                 { Ast.ValueType.Ulong, (heap, offset) => BitConverter.ToUInt64(heap, offset) },
                 { Ast.ValueType.Uint, (heap, offset) => BitConverter.ToUInt32(heap, offset) },
-                { ValueType.Short,  (m,o)=>BitConverter.ToInt16 (m,o) },
-                { ValueType.UShort, (m,o)=>BitConverter.ToUInt16(m,o) },
-                { ValueType.Byte,   (m,o)=>m[o] },
-                { ValueType.Sbyte,  (m,o)=>(sbyte)m[o] },
-                { ValueType.Decimal,(m,o)=>BitConverter.ToUInt32(m,o)},
+                { Ast.ValueType.Short,  (heap, offset)=>BitConverter.ToInt16 (heap, offset) },
+                { Ast.ValueType.UShort, (heap, offset)=>BitConverter.ToUInt16(heap, offset) },
+                { Ast.ValueType.Byte,   (heap, offset)=>heap[offset] },
+                { Ast.ValueType.Sbyte,  (heap, offset)=>(sbyte)heap[offset] },
+                { Ast.ValueType.Decimal,(heap, offset)=>BitConverter.ToUInt32(heap, offset)},
+                { Ast.ValueType.DateTime, (heap, offset) => new DateTime(BitConverter.ToInt64(heap, offset), DateTimeKind.Unspecified) },
+                { Ast.ValueType.TimeSpan, (heap, offset) => new TimeSpan(BitConverter.ToInt64(heap, offset)) },
             };
 
             private static readonly Dictionary<Ast.ValueType, Action<byte[], int, object>> typeWriters = new()
@@ -1860,6 +2143,8 @@
                 { Ast.ValueType.Array, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Object, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Enum, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
+                { Ast.ValueType.Struct, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
+                { Ast.ValueType.Nullable, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Bool, (heap, offset, value) => heap[offset] = (bool)value ? (byte)1 : (byte)0 },
                 { Ast.ValueType.Float, (heap, offset, value) => BitConverter.GetBytes((float)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Double, (heap, offset, value) => BitConverter.GetBytes((double)value).CopyTo(heap, offset) },
@@ -1869,6 +2154,8 @@
                 { Ast.ValueType.Uint, (heap, offset, value) => BitConverter.GetBytes((uint)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Short, (heap, offset, value) => BitConverter.GetBytes((short)value).CopyTo(heap, offset) },
                 { Ast.ValueType.UShort, (heap, offset, value) => BitConverter.GetBytes((ushort)value).CopyTo(heap, offset) },
+                { Ast.ValueType.DateTime, (heap, offset, value) => BitConverter.GetBytes(((DateTime)value).Ticks).CopyTo(heap, offset) },
+                { Ast.ValueType.TimeSpan, (heap, offset, value) => BitConverter.GetBytes(((TimeSpan)value).Ticks).CopyTo(heap, offset) },
             };
             public object ReadFromStack(int addr, ValueType vt)
             {
@@ -1947,12 +2234,14 @@
                 switch (type)
                 {
                     case ValueType.Int: return sizeof(int);
-                    case ValueType.Bool: return sizeof(int);
+                    case ValueType.Bool: return sizeof(bool);
                     case ValueType.String: return sizeof(int);
                     case ValueType.Array: return sizeof(int);
                     case ValueType.Object: return sizeof(int);
                     case ValueType.IntPtr: return sizeof(int);
                     case ValueType.Enum: return sizeof(int);
+                    case ValueType.Nullable: return sizeof(int);
+                    case ValueType.Struct: return sizeof(int);
                     case ValueType.Uint: return sizeof(uint);
                     case ValueType.Long: return sizeof(long);
                     case ValueType.Ulong: return sizeof(ulong);
@@ -1964,6 +2253,8 @@
                     case ValueType.UShort: return sizeof(ushort);
                     case ValueType.Byte: return sizeof(byte);
                     case ValueType.Sbyte: return sizeof(sbyte);
+                    case ValueType.DateTime: return sizeof(long);
+                    case ValueType.TimeSpan: return sizeof(long);
                     default: throw new ApplicationException($"Unsupported type {type}");
                 }
             }
@@ -1978,7 +2269,11 @@
                 var variable = Get(name);
                 ValidateAddress(variable.Address, GetTypeSize(variable.Type));
                 typeWriters[variable.Type](_memory, variable.Address, value);
-
+            }
+            public void WriteVariableById(int ptr, Ast.ValueType vt, object value)
+            {
+                ValidateAddress(ptr, GetTypeSize(vt));
+                typeWriters[vt](_memory, ptr, value);
             }
             internal void ValidateAddress(int addr, int size = 1)
             {
@@ -2286,6 +2581,19 @@
                 if (et == ValueType.Array && value is int p) return p;
                 if (et == ValueType.Object) return AddObject(value!);
                 if (et == ValueType.IntPtr && value is IntPtr ip) return ip.ToInt32();
+                if (et == ValueType.Nullable)
+                {
+                    if (value is null) return -1;
+                    var baseType = InferType(value);
+                    if (IsReferenceType(baseType)) throw new ApplicationException("Nullable type can only be applicable to value types");
+                    int bytes = 1 + GetTypeSize(baseType);
+                    int ptr = Malloc(bytes, ValueType.Nullable);
+                    _memory[ptr] = (byte)baseType;
+                    var span = RawMemory.AsSpan(ptr + 1, bytes - 1);
+                    ReadOnlySpan<byte> src = GetSourceBytes(baseType, value);
+                    src.CopyTo(span);
+                    return ptr;
+                }
                 if (et == ValueType.Array && value is ValueTuple<int, ValueType> info)
                 {
                     var (len, elemType) = info;
@@ -2436,8 +2744,9 @@
 
                 for (int i = 0; i < length; i++)
                 {
+                    Check();
                     int addr = ptr + i * elemSize;
-                    object current = IsReferenceType(elemType) ? DerefReference(addr, elemType) : ReadFromStack(addr, elemType);
+                    object current = IsReferenceType(elemType) ? DerefReference(addr, elemType)! : ReadFromStack(addr, elemType);
 
                     if ((current == null && element == null) || current?.Equals(element) == true)
                         return i;
@@ -2509,6 +2818,7 @@
                 object?[] buf = new object?[len];
                 for (int i = 0; i < len; i++)
                 {
+                    Check();
                     int addr = ptr + i * eSize;
 
                     buf[i] = IsReferenceType(elemType)
@@ -2527,6 +2837,7 @@
                     newPtr = Malloc(sizeof(int) * len, elemType);
                     for (int i = 0; i < len; i++)
                     {
+                        Check();
                         int packed = buf[i] switch
                         {
                             null => -1,
@@ -2543,6 +2854,7 @@
                     newPtr = Malloc(eSize * len, elemType);
                     for (int i = 0; i < len; i++)
                     {
+                        Check();
                         ReadOnlySpan<byte> src = GetSourceBytes(elemType, buf[i]);
                         src.CopyTo(RawMemory.AsSpan(newPtr + i * eSize, eSize));
                     }
@@ -2585,6 +2897,7 @@
                     newPtr = Malloc(sizeof(int) * len, elemType);
                     for (int i = 0; i < len; i++)
                     {
+                        Check();
                         int packed = data[i] switch
                         {
                             null => -1,
@@ -2601,6 +2914,7 @@
                     newPtr = Malloc(eSize * len, elemType);
                     for (int i = 0; i < len; i++)
                     {
+                        Check();
                         ReadOnlySpan<byte> src = GetSourceBytes(elemType, data[i]);
                         src.CopyTo(RawMemory.AsSpan(newPtr + i * eSize, eSize));
                     }
@@ -2642,6 +2956,7 @@
                     newPtr = Malloc(sizeof(int) * len, dstElemType);
                     for (int i = 0; i < len; i++)
                     {
+                        Check();
                         int packed = dst[i] switch
                         {
                             null => -1,
@@ -2660,6 +2975,7 @@
 
                     for (int i = 0; i < len; i++)
                     {
+                        Check();
                         object val = dst[i] ?? 0;
                         ReadOnlySpan<byte> srcBytes = dstElemType switch
                         {
@@ -2712,6 +3028,7 @@
                     newPtr = Malloc(sizeof(int) * outLen, elemType);
                     for (int i = 0; i < outLen; i++)
                     {
+                        Check();
                         int packed = passed[i] switch
                         {
                             null => -1,
@@ -2728,6 +3045,7 @@
                     newPtr = Malloc(eSize * outLen, elemType);
                     for (int i = 0; i < outLen; i++)
                     {
+                        Check();
                         ReadOnlySpan<byte> src = GetSourceBytes(elemType, passed[i]);
                         src.CopyTo(RawMemory.AsSpan(newPtr + i * eSize, eSize));
                     }
@@ -2741,6 +3059,7 @@
 
                 for (int i = 0, v = start, step = end >= start ? 1 : -1; i < len; i++, v += step)
                 {
+                    Check();
                     BitConverter.GetBytes(v) .CopyTo(RawMemory, ptr + i * sizeof(int));
                 }
                 return ptr;
@@ -2776,6 +3095,7 @@
 
                 for (int i = 0; i < len; i++)
                 {
+                    Check();
                     int addr = ptr + i * eSize;
                     object? val = IsReferenceType(elemType)
                                     ? DerefReference(addr, elemType)
@@ -2795,6 +3115,7 @@
 
                 for (int i = 0; i < len; i++)
                 {
+                    Check();
                     int addr = ptr + i * eSize;
                     object? val = IsReferenceType(elemType)
                                     ? DerefReference(addr, elemType)
@@ -2814,6 +3135,7 @@
 
                 for (int i = 0; i < len; i++)
                 {
+                    Check();
                     object? v = IsReferenceType(et)
                                 ? DerefReference(ptr + i * sz, et)
                                 : ReadFromStack(ptr + i * sz, et);
@@ -2835,6 +3157,7 @@
                 if (fromEnd) idx = idx.Reverse();
                 foreach (int i in idx)
                 {
+                    Check();
                     object? v = IsReferenceType(et)
                                 ? DerefReference(ptr + i * sz, et)
                                 : ReadFromStack(ptr + i * sz, et);
@@ -2857,6 +3180,7 @@
                 int cnt = 0;
                 for (int i = 0; i < len; i++)
                 {
+                    Check();
                     int a = ptr + i * sz;
                     object? v = IsReferenceType(et) ? DerefReference(a, et) : ReadFromStack(a, et);
                     if (Convert.ToBoolean(InvokeById(lid, v))) cnt++;
@@ -2871,6 +3195,7 @@
                 int acc = 0;
                 for (int i = 0; i < len; i++)
                 {
+                    Check();
                     object? v = IsReferenceType(et) ? DerefReference(ptr + i * sz, et) : ReadFromStack(ptr + i * sz, et);
                     acc += Convert.ToInt32(InvokeById(lid, v));
                 }
@@ -2894,11 +3219,13 @@
                     case ValueType.Decimal: return BitConverter.GetBytes((ulong)data!);
                     case ValueType.Char: return BitConverter.GetBytes((char)data!);
                     case ValueType.Bool: return BitConverter.GetBytes((bool)data!);
+                    case ValueType.DateTime: return BitConverter.GetBytes(((DateTime)data!).Ticks);
+                    case ValueType.TimeSpan: return BitConverter.GetBytes(((TimeSpan)data!).Ticks);
                     default:
                         throw new ApplicationException($"GetSourceBytes: Unsupported element type {vt}");
                 }
             }
-            private ReadOnlySpan<byte> GetSourceBytes(object? data)
+            public ReadOnlySpan<byte> GetSourceBytes(object? data)
             {
                 if (data is int i) return BitConverter.GetBytes(i);
                 else if (data is uint ui) return BitConverter.GetBytes(ui);
@@ -2912,6 +3239,8 @@
                 else if (data is float f) return BitConverter.GetBytes(f);
                 else if (data is double d) return BitConverter.GetBytes(d);
                 else if (data is string str) return BitConverter.GetBytes(PackReference(str, ValueType.String));
+                else if (data is DateTime dt) return BitConverter.GetBytes(dt.Ticks);
+                else if (data is TimeSpan ts) return BitConverter.GetBytes(ts.Ticks);
                 else if (data is decimal m)
                 {
                     int[] bits = decimal.GetBits(m);
@@ -2940,17 +3269,19 @@
                 ValueType.Double => 0d,
                 _ => null
             };
-            private object? DerefReference(int addr, ValueType vt)
+            public object? DerefReference(int addr, ValueType vt)
             {
                 int handle = BitConverter.ToInt32(_memory, addr);
-
-                return vt switch
+                switch (vt)
                 {
-                    ValueType.String => handle <= 0 ? null : ReadHeapString(handle),
-                    ValueType.Object => GetObject(handle),
-                    ValueType.Array => handle <= 0 ? null : handle,
-                    _ => handle <= 0 ? null : handle
-                };
+                    case Ast.ValueType.String: return handle <= 0 ? null : ReadHeapString(handle);
+                    case Ast.ValueType.Object: return GetObject(handle);
+                    case Ast.ValueType.Array: return handle <= 0 ? null : handle;
+                    case Ast.ValueType.Struct: return handle <= 0 ? null : handle;
+                    case Ast.ValueType.Nullable: if (handle <= 0) return null; var baseT = (ValueType)RawMemory[handle];
+                        return ReadFromMemorySlice(RawMemory[(handle + 1)..(handle + 1 + GetTypeSize(baseT))], baseT);
+                    default: return handle <= 0 ? null : handle;
+                }
             }
             
 
@@ -2966,8 +3297,9 @@
             #region Variable pointer dictionary manager
             public void Declare(string name, ValueType type, object? value)
             {
+                if (name.Length > 200) throw new ApplicationException("Variable name is too large");
                 if (_scopes.Peek().ContainsKey(name))
-                    throw new Exception($"Variable '{name}' already declared");
+                    throw new ApplicationException($"Variable '{name}' already declared");
                 if (type == ValueType.String)
                 {
                     if (value is string s)
@@ -2988,6 +3320,14 @@
                         WriteVariable(name, -1);
                     }
                     else throw new ApplicationException("Declaring string with non-string value");
+                }
+                else if (type == ValueType.Nullable)
+                {
+                    var variable = Stackalloc(ValueType.Nullable);
+                    _scopes.Peek()[name] = variable;
+                    int pointer = value is null ? -1 : PackReference(value, ValueType.Nullable);
+                    WriteVariable(name, pointer);
+                    return;
                 }
                 else if (type == ValueType.Array)
                 {
@@ -3068,7 +3408,7 @@
                 }
 
             }
-            public Ast.ValueType InferType(object v)
+            public static Ast.ValueType InferType(object v)
             {
                 switch (v)
                 {
@@ -3116,6 +3456,10 @@
                         ValueType.Char => Convert.ToChar(value, CultureInfo.InvariantCulture),
                         ValueType.Bool => Convert.ToBoolean(value, CultureInfo.InvariantCulture),
                         ValueType.String => value.ToString()!,
+                        ValueType.Nullable => value is null ? null! : PackReference(value, ValueType.Nullable),
+
+                        ValueType.DateTime => value is string ds ? DateTime.Parse(ds, CultureInfo.InvariantCulture) : (value is long li ? new DateTime(li) : value),
+                        ValueType.TimeSpan => value is string ts ? TimeSpan.Parse(ts, CultureInfo.InvariantCulture) : (value is long lt ? new TimeSpan(lt) : value),
 
                         _ => value
                     };
@@ -3166,7 +3510,285 @@
             }
 
             #endregion
+            #region Struct helpers
+            public int GetStructFieldOffset(int instPtr, string field, out ValueType vt)
+            {
+                int sigPtr = BitConverter.ToInt32(_memory, instPtr);
+                int sigLen = GetHeapObjectLength(sigPtr);
 
+                int sigPos = 0;
+                int dataOffs = 4;
+
+                while (sigPos < sigLen)
+                {
+                    vt = (ValueType)_memory[sigPtr + sigPos++];
+                    int nameLen = _memory[sigPtr + sigPos++];
+                    string name = Encoding.UTF8.GetString(_memory, sigPtr + sigPos, nameLen);
+                    sigPos += nameLen;
+                    byte hasInit = _memory[sigPtr + sigPos++];
+                    if (hasInit == 1)
+                    {
+                        int sz = GetTypeSize(vt);
+                        sigPos += sz;
+                    }
+                    if (name == field) return dataOffs;
+
+                    dataOffs += 1 + GetTypeSize(vt);
+                }
+                throw new ApplicationException($"Поле '{field}' не найдено");
+            }
+            public void WriteStructField(int instPtr, string field, object value)
+            {
+                int off = GetStructFieldOffset(instPtr, field, out var vt) + 1;
+                if (!Ast.MatchVariableType(value, vt) && vt != ValueType.Object)
+                    value = Cast(value, vt);
+
+                if (IsReferenceType(vt))
+                {
+                    int oldPtr = BitConverter.ToInt32(_memory, instPtr + off);
+                    if (oldPtr >= StackSize) Free(oldPtr);
+                    int packed = PackReference(value, vt);
+                    BitConverter.GetBytes(packed).CopyTo(_memory, instPtr + off);
+                }
+                else
+                {
+                    ReadOnlySpan<byte> src = GetSourceBytes(vt, value);
+                    src.CopyTo(_memory.AsSpan(instPtr + off, src.Length));
+                }
+            }
+            #region Seialization
+            public int SerializeJson(int anyPtr, int depthLimit = 8)
+            {
+                const int MaxOutBytes = 256 * 1024;
+                const int HardMaxDepth = 32; 
+                const int MaxStringBytes = 64 * 1024;
+                const int MaxArrayElements = 16_384;
+                const int MaxStructFields = 1_024;
+                byte[] mem = RawMemory;
+                const byte QUOTE = (byte)'"';
+                const byte BSL = (byte)'\\';
+                const byte LBR = (byte)'{';
+                const byte RBR = (byte)'}';
+                const byte LSB = (byte)'[';
+                const byte RSB = (byte)']';
+                const byte COL = (byte)':';
+                const byte COM = (byte)',';
+                byte[] buf = System.Buffers.ArrayPool<byte>.Shared.Rent(1024);
+                int w = 0;
+                void Ensure(int add)
+                {
+                    if (add < 0) throw new ApplicationException("Serialization internal error");
+                    long need = (long)w + add;
+                    if (need > MaxOutBytes) throw new ApplicationException("Serialization Limit Exceeded");
+                    if (need <= buf.Length) return;
+                    int target = (int)need;
+                    int next = buf.Length << 1;
+                    if (next < target) next = target;
+                    if (next > MaxOutBytes) next = MaxOutBytes;
+                    if (next < target) throw new ApplicationException("Serialization Limit Exceeded");
+                    byte[] n = System.Buffers.ArrayPool<byte>.Shared.Rent(System.Math.Max(buf.Length << 1, w + add));
+                    System.Buffer.BlockCopy(buf, 0, n, 0, w);
+                    System.Buffers.ArrayPool<byte>.Shared.Return(buf); buf = n;
+                }
+                void PutEscByte(byte b)
+                {
+                    if (b == QUOTE || b == BSL) { Ensure(2); buf[w++] = BSL; buf[w++] = b; return; }
+                    if (b >= 0x20) { Ensure(1); buf[w++] = b; return; }
+
+                    Ensure(6);
+                    buf[w++] = (byte)'\\'; buf[w++] = (byte)'u';
+                    buf[w++] = (byte)'0'; buf[w++] = (byte)'0';
+                    const string HEX = "0123456789ABCDEF";
+                    buf[w++] = (byte)HEX[(b >> 4) & 0xF];
+                    buf[w++] = (byte)HEX[b & 0xF];
+                }
+                void PutQuotedUtf8(ReadOnlySpan<byte> raw)
+                {
+                    Ensure(1); buf[w++] = QUOTE;
+                    for (int i = 0; i < raw.Length; i++) PutEscByte(raw[i]);
+                    Ensure(1); buf[w++] = QUOTE;
+                }
+                static bool IsRef(Ast.ValueType vt) => Ast.IsReferenceType(vt);
+                void PutBool(bool v) { ReadOnlySpan<byte> s = v ? "true"u8 : "false"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
+                void PutInt32(int v) { Ensure(11); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c); w += c; }
+                void PutUInt32(uint v) { Ensure(11); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c); w += c; }
+                void PutInt64(long v) { Ensure(20); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c); w += c; }
+                void PutUInt64(ulong v) { Ensure(20); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c); w += c; }
+                void PutFloat(float v) { Ensure(24); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c, new System.Buffers.StandardFormat('G')); w += c; }
+                void PutDouble(double v) { Ensure(24); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c, new System.Buffers.StandardFormat('G')); w += c; }
+                void PutChar(ushort ch) { PutQuotedUtf8(System.Text.Encoding.UTF8.GetBytes(((char)ch).ToString())); }
+                int NormalizeInstancePtr(int p)
+                {
+                    if (p < StackSize)
+                    {
+                        int h = BitConverter.ToInt32(mem, p);
+                        return (h >= StackSize) ? h : -1;
+                    }
+                    return p;
+                }
+                ReadOnlySpan<byte> HeapSpan(int ptr)
+                {
+                    int len = GetHeapObjectLength(ptr);
+                    return mem.AsSpan(ptr, len);
+                }
+                void PutStringFromHeap(int ptr)
+                {
+                    if (ptr < StackSize) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    var raw = HeapSpan(ptr);
+                    PutQuotedUtf8(raw);
+                }
+
+                void PutNullableFromHeap(int ptr)
+                {
+                    if (ptr < StackSize) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    var baseT = (Ast.ValueType)mem[ptr];
+                    int valAddr = ptr + 1;
+                    PutValue(baseT, valAddr, isHeapPayload: true, depth: 0);
+                }
+                void PutArrayFromHeap(int ptr, int depth)
+                {
+                    bool GetArrayMeta(int ptr, out int len)
+                    {
+                        len = 0;
+                        try { len = GetArrayLength(ptr); }
+                        catch { return false; }
+                        if (len < 0 || len > MaxArrayElements) return false;
+                        return true;
+                    }
+                    if (depth <= 0) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    if (ptr < StackSize || !GetArrayMeta(ptr, out int len)) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    var et = GetHeapObjectType(ptr);
+                    Ensure(1); buf[w++] = LSB;
+                    for (int i = 0; i < len; i++)
+                    {
+                        if (i != 0) { Ensure(1); buf[w++] = COM; }
+                        if (!Ast.IsReferenceType(et))
+                        {
+                            int es = GetTypeSize(et);
+                            long off = (long)i * es;
+                            if (off > int.MaxValue) throw new ApplicationException("Serialization Limit Exceeded");
+                            PutValue(et, ptr + (int)off, isHeapPayload: true, depth: depth);
+                        }
+                        else
+                        {
+                            long off = (long)i * sizeof(int);
+                            if (off > int.MaxValue) throw new ApplicationException("Serialization Limit Exceeded");
+                            int h = BitConverter.ToInt32(mem, (ptr + (int)off));
+                            if (h <= 0) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; continue; }
+                            if (et == Ast.ValueType.String) PutStringFromHeap(h);
+                            else if (et == Ast.ValueType.Struct) PutStructInstance(h, depth - 1);
+                            else if (et == Ast.ValueType.Array) PutArrayFromHeap(h, depth - 1);
+                            else if (et == Ast.ValueType.Nullable) PutNullableFromHeap(h);
+                            else { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
+                        }
+                    }
+                    Ensure(1); buf[w++] = RSB;
+                }
+                void PutValue(Ast.ValueType vt, int addr, bool isHeapPayload, int depth)
+                {
+                    if (Ast.IsReferenceType(vt))
+                    {
+                        int h = BitConverter.ToInt32(mem, addr);
+                        if (h <= 0) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                        if (vt == Ast.ValueType.String) { PutStringFromHeap(h); return; }
+                        if (vt == Ast.ValueType.Struct) { PutStructInstance(h, depth - 1); return; }
+                        if (vt == Ast.ValueType.Array) { PutArrayFromHeap(h, depth - 1); return; }
+                        if (vt == Ast.ValueType.Nullable) { PutNullableFromHeap(h); return; }
+                        var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length;
+                        return;
+                    }
+                    switch (vt)
+                    {
+                        case Ast.ValueType.Bool: PutBool(mem[addr] != 0); break;
+                        case Ast.ValueType.Byte: PutUInt32(mem[addr]); break;
+                        case Ast.ValueType.Sbyte: PutInt32(unchecked((sbyte)mem[addr])); break;
+                        case Ast.ValueType.Short: PutInt32(BitConverter.ToInt16(mem, addr)); break;
+                        case Ast.ValueType.UShort: PutUInt32(BitConverter.ToUInt16(mem, addr)); break;
+                        case Ast.ValueType.Int: PutInt32(BitConverter.ToInt32(mem, addr)); break;
+                        case Ast.ValueType.Uint: PutUInt32(BitConverter.ToUInt32(mem, addr)); break;
+                        case Ast.ValueType.Long: PutInt64(BitConverter.ToInt64(mem, addr)); break;
+                        case Ast.ValueType.Ulong: PutUInt64(BitConverter.ToUInt64(mem, addr)); break;
+                        case Ast.ValueType.DateTime: PutInt64(BitConverter.ToInt64(mem, addr)); break;
+                        case Ast.ValueType.TimeSpan: PutInt64(BitConverter.ToInt64(mem, addr)); break;
+                        case Ast.ValueType.Float: PutFloat(BitConverter.ToSingle(mem, addr)); break;
+                        case Ast.ValueType.Double: PutDouble(BitConverter.ToDouble(mem, addr)); break;
+                        case Ast.ValueType.Char: PutChar(BitConverter.ToUInt16(mem, addr)); break;
+                        case Ast.ValueType.Enum: PutInt32(BitConverter.ToInt32(mem, addr)); break;
+                        default: var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; break;
+                    }
+                }
+                void PutStructInstance(int instPtr, int depth)
+                {
+                    if (depth <= 0) { var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
+                    if (instPtr < StackSize) { var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
+
+                    int sigPtr = BitConverter.ToInt32(mem, instPtr);
+                    if (sigPtr < StackSize) { var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
+                    var sig = HeapSpan(sigPtr);
+                    int sigLen = sig.Length;
+                    int s = 0;
+
+                    int val = instPtr + sizeof(int);
+                    Ensure(1); buf[w++] = LBR;
+                    bool first = true;
+                    int fields = 0;
+                    while (s < sigLen)
+                    {
+                        if (fields++ >= MaxStructFields) throw new ApplicationException("Too many struct fields");
+                        Ast.ValueType fieldType = (Ast.ValueType)sig[s++]; 
+                        if (s >= sigLen) break;
+                        int nameLen = sig[s++];
+                        if (nameLen < 0 || nameLen > MaxStringBytes) throw new ApplicationException("Field name too large");
+                        if (s + nameLen + 1 > sigLen) break;
+                        ReadOnlySpan<byte> nameBytes = sig.Slice(s, nameLen);
+                        s += nameLen;
+                        bool hasInit = sig[s++] != 0;
+                        if (hasInit) s += GetTypeSize(fieldType);
+
+                        Ast.ValueType instFieldType = (Ast.ValueType)mem[val++];
+                        int payloadSize = IsRef(instFieldType) ? sizeof(int) : GetTypeSize(instFieldType);
+
+                        if (!first) { Ensure(1); buf[w++] = COM; } first = false;
+                        Ensure(1); buf[w++] = QUOTE; for (int i = 0; i < nameBytes.Length; i++) PutEscByte(nameBytes[i]); Ensure(1); buf[w++] = QUOTE; Ensure(1); buf[w++] = COL;
+                        PutValue(instFieldType, val, isHeapPayload: true, depth: depth);
+
+                        val += payloadSize;
+                    }
+                    Ensure(1); buf[w++] = RBR;
+                }
+                depthLimit = depthLimit < 0 ? 0 : (depthLimit > HardMaxDepth ? HardMaxDepth : depthLimit);
+                int inst = NormalizeInstancePtr(anyPtr);
+                if (inst < 0) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
+                else
+                {
+                    var t = GetHeapObjectType(inst);
+                    if (t == Ast.ValueType.String) { PutStringFromHeap(inst); }
+                    else if (t == Ast.ValueType.Nullable) { PutNullableFromHeap(inst); }
+                    else
+                    {
+                        int sigPtr = BitConverter.ToInt32(mem, inst);
+                        bool looksLikeStruct = sigPtr >= StackSize && GetHeapObjectType(sigPtr) == Ast.ValueType.Byte;
+                        if (looksLikeStruct) PutStructInstance(inst, depthLimit);
+                        else PutArrayFromHeap(inst, depthLimit);
+                    }
+                }
+                try
+                {
+                    int ptr = Malloc(w, Ast.ValueType.String);
+                    WriteBytes(ptr, buf.AsSpan(0, w));
+                    return ptr;
+                }
+                finally
+                {
+                    System.Buffers.ArrayPool<byte>.Shared.Return(buf);
+                }
+            }
+            public int DeserializeJson(int ptr, string typeName)
+            {
+                return -1;
+            }
+            #endregion
+            #endregion
         }
         #endregion
         #region Object Handle
@@ -3219,7 +3841,6 @@
         public AstNode? RootNode { get; private set; }
         const int MaxOutputLen = 4000;
         public string Output = "";
-        private readonly Random _random = new();
         public Ast()
         {
             this.Context = new Ast.ExecutionContext(CancellationToken.None);
@@ -3262,7 +3883,7 @@
         }
         public enum ValueType
         {
-            Int, String, Bool, Double, Ulong, Uint, Long, Byte, Object, Sbyte, Short, Char, UShort, Float, Decimal, IntPtr, Array, Enum
+            Int, String, Bool, Double, Ulong, Uint, Long, Byte, Object, Sbyte, Short, Char, UShort, Float, Decimal, IntPtr, Array, Enum, Nullable, Struct, DateTime, TimeSpan
         }
         public enum Associativity { Left, Right }
         public enum OperatorToken
@@ -3320,7 +3941,6 @@
             ParenOpen,//(
             ParenClose,//)
             Semicolon,//;
-            Equals,//=
             EndOfInput,
             Colon,//:
             BraceOpen, //{
@@ -3389,7 +4009,7 @@
             { OperatorToken.NullDefault, new OperatorInfo(2, Associativity.Left) },
             { OperatorToken.NullDefaultEqual, new OperatorInfo(2, Associativity.Left) },
         };
-        public static bool TryGetOperatorInfo(OperatorToken token, out OperatorInfo info) =>
+        public static bool TryGetOperatorInfo(OperatorToken token, out OperatorInfo? info) =>
         _operatorTable.TryGetValue(token, out info);
 
         public static OperatorInfo GetOperatorInfo(OperatorToken token) =>
@@ -3397,27 +4017,33 @@
             : throw new ArgumentNullException($"No operator info defined for {token}");
         private void ImportStandartLibrary(bool consoleOutput = false)
         {
-            this.Context.RegisterNative("print", (string str) => { if (Output.Length < MaxOutputLen) Output += (str + '\n'); if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("print", (int str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("print", (ulong str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("print", (double str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("print", (bool str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("print", (char str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("Console.WriteLine", (string str) => { if (Output.Length < MaxOutputLen) Output += (str + '\n'); if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("Console.WriteLine", (int str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("Console.WriteLine", (ulong str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("Console.WriteLine", (double str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("Console.WriteLine", (bool str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("Console.WriteLine", (char str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
-            this.Context.RegisterNative("Console.Write", (string str) => { if (Output.Length < MaxOutputLen) Output += (str); if (consoleOutput) Console.Write(str); });
+            var printNames = new string[] { "print", "Console.WriteLine" };
+            for(int i = 0; i < printNames.Length; i++)
+            {
+                Context.RegisterNative(printNames[i], (string str) => { if (Output.Length + str?.Length < MaxOutputLen) Output += (str + '\n'); if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (int str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (ulong str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (double str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (bool str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (char str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (DateTime str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (TimeSpan str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
+            }
+            
+            this.Context.RegisterNative("Console.Write", (string str) => { if (Output.Length + str?.Length < MaxOutputLen) Output += (str + '\n'); if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (int str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (ulong str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (double str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (bool str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (char str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
+            this.Context.RegisterNative("Console.Write", (DateTime str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
+            this.Context.RegisterNative("Console.Write", (TimeSpan str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
 
-            this.Context.RegisterNative("typeof", (object o) => { return o.GetType().ToString(); });
-            this.Context.RegisterNative("sizeof", (object o) => { return Context.GetTypeSize(Context.InferType(o)); });
+            this.Context.RegisterNative("typeof", (object o) => { return o is null ? "Null" :o.GetType().Name; });
+            this.Context.RegisterNative("sizeof", (object o) => { return Context.GetTypeSize(ExecutionContext.InferType(o)); });
+            this.Context.RegisterNative("TypeOfPtr", (int ptr) => { return GetTypeByPtr(ptr)?.ToString() ?? "null"; });
+            this.Context.RegisterNative("Json.Serialize", (int ptr) => { return Context.SerializeJson(ptr); });
+            this.Context.RegisterNative("Json.Deserialize", (int ptr, string name) => { return Context.DeserializeJson(ptr, name); });
             this.Context.RegisterNative("Length", (Func<int, int>)Context.GetArrayLength);
             this.Context.RegisterNative("Length", (string str) => str.Length);
             this.Context.RegisterNative("Count", (Func<int, int>)Context.GetArrayLength);
@@ -3479,10 +4105,18 @@
             this.Context.RegisterNative("Join", (int varaiable, string separator) => { return Join(separator, varaiable); });
             this.Context.RegisterNative("String.Join", (string separator, int varaiable) => { return Join(separator, varaiable); });
             this.Context.RegisterNative("Join", (int varaiable) => { return Join(", ", varaiable); });
-            this.Context.RegisterNative("Random", (Func<int, int, int>)_random.Next);
-            this.Context.RegisterNative("Next", (Func<int, int, int>)_random.Next);
-            this.Context.RegisterNative("UtcNow", () => { return DateTime.UtcNow.ToString(); });
-            this.Context.RegisterNative("TimeNow", () => { return DateTime.Now.ToString(); });  
+            this.Context.RegisterNative("Random.Next", (Func<int, int, int>)Random.Shared.Next);
+            this.Context.RegisterNative("Next", (Func<int, int, int>)Random.Shared.Next);
+            this.Context.RegisterNative("UtcNow", () => { return DateTime.UtcNow; });
+            this.Context.RegisterNative("TimeNow", () => { return DateTime.Now; });
+            this.Context.RegisterNative("DateTimeParse", (string s) => DateTime.Parse(s, CultureInfo.InvariantCulture));
+            this.Context.RegisterNative("TimeSpanParse", (string s) => TimeSpan.Parse(s, CultureInfo.InvariantCulture));
+            this.Context.RegisterNative("Ticks", (DateTime d) => d.Ticks);
+            this.Context.RegisterNative("Ticks", (TimeSpan t) => t.Ticks);
+            this.Context.RegisterNative("DateTimeAdd", (DateTime d, TimeSpan t) => d+t);
+            this.Context.RegisterNative("DateTimeSubtract", (DateTime d, TimeSpan t) => d-t);
+            this.Context.RegisterNative("TimeSpanSubtract", (TimeSpan d, TimeSpan t) => d-t);
+            this.Context.RegisterNative("TimeSpanAdd", (TimeSpan d, TimeSpan t) => d+t);
             this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object[] callArgs)
                 => InvokeByAttribute(this.Context, attr, attrArgs, callArgs));
             this.Context.RegisterNative("Split", (Func<string, string, int>)Split);
@@ -3501,6 +4135,8 @@
             this.Context.RegisterNative("ToString", (byte val) => { return val.ToString(); });
             this.Context.RegisterNative("ToString", (char val) => { return val.ToString(); });
             this.Context.RegisterNative("ToString", (string val) => { return val; });
+            this.Context.RegisterNative("ToString", (DateTime val) => { return val.ToString(CultureInfo.InvariantCulture); });
+            this.Context.RegisterNative("ToString", (TimeSpan val) => { return val.ToString(); });
             this.Context.RegisterNative("IntParse", (string val) => { return int.Parse(val); });
             this.Context.RegisterNative("Int.Parse", (string val) => { return int.Parse(val); });
             this.Context.RegisterNative("IntParse", (char val) => { return (int)(val - '0'); });
@@ -3529,10 +4165,64 @@
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object>)((id, a1, a2) => Context.InvokeById(id, a1, a2)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object, object>)((id, a1, a2, a3) => Context.InvokeById(id, a1, a2, a3)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object, object, object>)((id, a1, a2, a3, a4) => Context.InvokeById(id, a1, a2, a3, a4)));
+            this.Context.RegisterNative("Free", (Action<int>)Context.Free);
+            this.Context.RegisterNative("PrintMemoryUsage", () => { if (Output.Length < MaxOutputLen) Output += 
+                    ($"{Context.MemoryUsed/1024}Kb {Context.MemoryUsed%1024}B used out of {(Context.RawMemory.Length - Context.StackSize)/1024}Kb total"); });
+            this.Context.RegisterNative("PrintMemoryDump", () => { var mem = Context.PrintMemory(); if (Output.Length+Math.Min(mem.Length, MaxOutputLen-1) < MaxOutputLen) 
+                    Output+= mem.Length > MaxOutputLen-1 ? mem.Substring(0, MaxOutputLen-1) : mem; });
+            this.Context.RegisterNative("GetMemoryUsage", () => { return $"{Context.MemoryUsed / 1024}Kb {Context.MemoryUsed % 1024}B used " +
+                $"out of {(Context.RawMemory.Length - Context.StackSize) / 1024}Kb total"; });
+            this.Context.RegisterNative("GetMemoryDump", () => { var mem = Context.PrintMemory(); return mem; });
+            this.Context.RegisterNative("GetMemoryDump", (int len) => { var mem = Context.PrintMemory(); return mem.Length>len? mem.Substring(0, len) : mem; });
 
         }
         #region Helpers
-        
+        static string FormatExceptionForUser(Exception ex, int frameLimit = 3, int innerLimit = 1)
+        {
+            for (int i = 0; i < innerLimit; i++)
+            {
+                if (ex is System.Reflection.TargetInvocationException tie && tie.InnerException != null)
+                    ex = tie.InnerException;
+                else if (ex.InnerException != null)
+                    ex = ex.InnerException;
+                else
+                    break;
+            }
+
+            var sb = new System.Text.StringBuilder(256);
+            sb.Append(ex.GetType().Name).Append(": ").AppendLine(ex.Message);
+
+            // Берём стек как текст (может быть null).
+            var st = ex.StackTrace;
+            if (string.IsNullOrEmpty(st))
+                return sb.Append("  at <no stack trace>").ToString();
+
+            var lines = st.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            int shown = 0;
+            for (int i = 0; i < lines.Length && shown < frameLimit; i++)
+            {
+                var line = lines[i].TrimStart();
+                if (!line.StartsWith("at ", StringComparison.Ordinal)) continue;
+
+                int inIdx = line.IndexOf(" in ", StringComparison.Ordinal);
+                if (inIdx >= 0) line = line.Substring(0, inIdx);
+
+                sb.Append("  ").AppendLine(line);
+                shown++;
+            }
+            if (lines.Length > shown) sb.AppendLine("  ...");
+            return sb.ToString().TrimEnd();
+        }
+        private Ast.ValueType? GetTypeByPtr(int ptr)
+        {
+            if (ptr <= 0 || ptr >= this.Context.RawMemory.Length - sizeof(int)) return null;
+            if (ptr < Context.StackSize)
+            {
+                var v = Context.GetVariableByAddress(ptr);
+                return !v.HasValue ? null : v.Value.Type;
+            }
+            return this.Context.GetHeapObjectType(ptr);
+        }
         private static bool MatchVariableType(object value, ValueType type) => type switch
         {
             ValueType.Int => value is int,
@@ -3551,6 +4241,10 @@
             ValueType.Decimal => value is decimal,
             ValueType.Object => value is object,
             ValueType.IntPtr => value is int,
+            ValueType.Nullable => value is null || !IsReferenceType(ExecutionContext.InferType(value)),
+            ValueType.Struct => value is int,
+            ValueType.DateTime => value is DateTime,
+            ValueType.TimeSpan => value is TimeSpan,
             ValueType.Array => value is ValueTuple<int, ValueType> 
             || value is ValueTuple<object?[], ValueType> 
             || value is int,
@@ -3572,6 +4266,8 @@
             ValueType.Char => false,
             ValueType.Bool => false,
             ValueType.IntPtr => false,
+            ValueType.DateTime => false,
+            ValueType.TimeSpan => false,
             _ => true
         };
         private string Join(string separator, string arrayName)
@@ -3693,7 +4389,6 @@
                 var res = (candidate.Value).Body.Evaluate(ctx);
                 return res is Ast.ReturnSignal r ? r.Value : res;
             }
-            catch(Exception ex) { Console.WriteLine(ex.ToString()); return null!; }
             finally
             {
                 ctx.ExitScope();
@@ -3763,8 +4458,8 @@
                             }
                             context.ValidateAddress(addr, context.GetTypeSize(vInfo.Type));
                             var varInfo = context.GetVariableByAddress(addr);
-                            if (varInfo is null) throw new InvalidOperationException("Stack pointer to dead memory");
-                            return context.ReadFromStack(addr, (ValueType)(varInfo?.Type));
+                            if (!varInfo.HasValue) throw new InvalidOperationException("Stack pointer to dead memory");
+                            return context.ReadFromStack(addr, (ValueType)(varInfo.Value.Type));
                         }
                         int p = Convert.ToInt32(Operand.Evaluate(context));
                         context.ValidateAddress(p, sizeof(int));
@@ -3785,6 +4480,13 @@
                     var cur = ctx.ReadVariable(vr.Name);
                     object newVal = Add(cur, add);
                     ctx.WriteVariable(vr.Name, newVal);
+                    return IsPostfix ? cur : newVal;
+                }
+                if (Operand is ArrayIndexNode ai)
+                {
+                    var cur = ai.Evaluate(ctx);
+                    var newVal = Add(cur, add);
+                    ai.Write(ctx, newVal);
                     return IsPostfix ? cur : newVal;
                 }
                 var val = Operand.Evaluate(ctx);
@@ -3866,6 +4568,13 @@
 
                 if (Op == OperatorToken.Equals && Left is VariableReferenceNode lv)
                 {
+                    if (!context.HasVariable(lv.Name) && context.HasVariable("this") && context.Get("this").Type == Ast.ValueType.Struct)
+                    {
+                        int instPtr = Convert.ToInt32(context.ReadVariable("this"));
+                        var rhs = Right.Evaluate(context);
+                        context.WriteStructField(instPtr, lv.Name, rhs);
+                        return rhs;
+                    }
                     var lvInfo = context.Get(lv.Name);
                     if (lvInfo.Type == ValueType.String)
                     {
@@ -3889,6 +4598,33 @@
                         string strVal = Right.Evaluate(context)?.ToString() ?? string.Empty;
                         context.StoreStringVariable(lv.Name, strVal);
                         return strVal;
+                    }
+                    if(lvInfo.Type == ValueType.Char)
+                    {
+                        var rhs = Right.Evaluate(context);
+                        if(!MatchVariableType(rhs, lvInfo.Type)) throw new ApplicationException($"Type missmatch during char assignment: {rhs.GetType()}");
+                        context.WriteVariable(lv.Name, Convert.ToChar(rhs));
+                        return Convert.ToChar(rhs);
+                    }
+                    if(lvInfo.Type == ValueType.Nullable)
+                    {
+                        int oldPtr = (int)context.ReadVariable(lv.Name);
+                        if (oldPtr >= context.StackSize && context.IsUsed(oldPtr)) context.Free(oldPtr);
+                        var rhs = Right.Evaluate(context);
+                        if (rhs is null)
+                        {
+                            context.WriteVariable(lv.Name, -1);
+                            return null!;
+                        }
+                        if(oldPtr<0) context.WriteVariable(lv.Name, context.PackReference(rhs, ValueType.Nullable));
+                        else
+                        {
+                            var baseType = (ValueType)context.RawMemory[oldPtr];
+                            if (!Ast.MatchVariableType(rhs, baseType)) rhs = context.Cast(rhs, baseType);
+                            ReadOnlySpan<byte> src = context.GetSourceBytes(baseType, rhs);
+                            src.CopyTo(context.RawMemory.AsSpan(oldPtr + 1, src.Length));
+                        }
+                        return rhs;
                     }
                     if (lvInfo.Type == ValueType.Array)
                     {
@@ -3961,12 +4697,17 @@
                 var r = Right.Evaluate(context);
                 if ((Op is OperatorToken.Equal or OperatorToken.NotEqual))
                 {
-                    if(l is string || r is string)
+                    if (l is string || r is string)
                     {
                         bool eq = string.Equals(l?.ToString(), r?.ToString(), StringComparison.Ordinal);
                         return Op == OperatorToken.Equal ? eq : !eq;
                     }
-                    else if(l is null || r is null)
+                    else if (l is char || r is char)
+                    {
+                        bool eq = string.Equals(l?.ToString(), r?.ToString(), StringComparison.Ordinal);
+                        return Op == OperatorToken.Equal ? eq : !eq;
+                    }
+                    else if (l is null || r is null)
                     {
                         bool eq = ReferenceEquals(l, r) || (l?.Equals(r) ?? false);
                         return Op == OperatorToken.Equal ? eq : !eq;
@@ -3994,22 +4735,54 @@
                 else if (l is ushort us) result = EvaluateBinary(us, Convert.ToUInt16(r), Op);
                 else if (l is byte b) result = EvaluateBinary(b, Convert.ToByte(r), Op);
                 else if (l is sbyte sb) result = EvaluateBinary(sb, Convert.ToSByte(r), Op);
+                else if (l is DateTime dl) result = EvaluateBinary(dl, Convert.ToDateTime(r), Op);
                 else if (l is null) throw new ApplicationException($"Unsupported operator {Op} for null");
                 else throw new ApplicationException($"Unsupported operator {Op} for Type {l.GetType()}");
                 if (Left is VariableReferenceNode vr && IsAssignmentOp(Op))
                 {
+                    if (!context.HasVariable(vr.Name) && context.HasVariable("this") && context.Get("this").Type == Ast.ValueType.Struct)
+                    {
+                        int instPtr = Convert.ToInt32(context.ReadVariable("this"));
+                        context.WriteStructField(instPtr, vr.Name, result);
+                        return result;
+                    }
                     context.WriteVariable(vr.Name, result);
                 }
                 else if (Left is ArrayIndexNode ai && IsAssignmentOp(Op))
                 {
                     ai.Write(context, result);
                 }
+                else if (Left is UnaryOpNode un && un.Op == OperatorToken.Multiply && Op == OperatorToken.Equals)
+                {
+                    int addr = un.Operand is VariableReferenceNode pvr 
+                        ? Convert.ToInt32(context.ReadVariable(pvr.Name)) 
+                        : Convert.ToInt32(un.Operand.Evaluate(context));
+                    var target = context.GetVariableByAddress(addr) 
+                        ?? throw new InvalidOperationException("Pointer points to invalid stack memory");
+                    object rhs = Right.Evaluate(context);
+                    if (!MatchVariableType(rhs, target.Type)) rhs = context.Cast(rhs, (Ast.ValueType)target.Type);
+                    context.WriteVariableById(addr, target.Type, rhs);
+                    return rhs;
+                }
+                else if (Op == OperatorToken.Equals && Left is UnresolvedReferenceNode ur && ur.Parts.Count == 2)
+                {
+                    string varName = ur.Parts[0];
+                    string field = ur.Parts[1];
+                    var info = context.Get(varName);
+                    if (info.Type != ValueType.Struct) throw new ApplicationException($"{varName} is not a struct");
+                    int instPtr = Convert.ToInt32(context.ReadVariable(varName));
+                    object rhs = Right.Evaluate(context);
+                    context.WriteStructField(instPtr, field, rhs);
+                    return rhs;
+                }
                 else if (IsAssignmentOp(Op))
                 {
                     throw new InvalidOperationException("Assignment operator points to nothing");
                 }
-                    return result;
+                return result;
             }
+
+
             private static bool IsAssignmentOp(OperatorToken op) => op is OperatorToken.Equals or OperatorToken.PlusEqual or
                 OperatorToken.MinusEqual or OperatorToken.MultiplyEqual or OperatorToken.DivideEqual or OperatorToken.ModuleEqual or
                 OperatorToken.NullDefaultEqual or OperatorToken.BitAndEqual or OperatorToken.BitOrEqual or OperatorToken.BitXorEqual or
@@ -4035,11 +4808,26 @@
                 {
                     return EvaluateDouble(Convert.ToDouble(l), Convert.ToDouble(r), op);
                 }
-               
+                if (lCode == TypeCode.DateTime || rCode == TypeCode.DateTime)
+                {
+                    var ld = Convert.ToDateTime(l); var rd = Convert.ToDateTime(r);
+                    return op switch 
+                    { 
+                        OperatorToken.Minus => ld - rd, 
+                        OperatorToken.MinusEqual => ld - rd, 
+                        OperatorToken.Equal => ld == rd,
+                        OperatorToken.GreaterOrEqual => ld >= rd,
+                        OperatorToken.LessOrEqual => ld <= rd,
+                        OperatorToken.Less => ld < rd,
+                        OperatorToken.Greater => ld > rd,
+                        _ => throw new ApplicationException($"Unsupported op {op} for DateTime")
+                    };
+                }
                 bool unsigned = false;
                 switch (lCode)
                 {
                     case TypeCode.Byte:
+                    case TypeCode.DateTime:
                     case TypeCode.UInt16:
                     case TypeCode.UInt32:
                     case TypeCode.UInt64: unsigned = true; break;
@@ -4198,22 +4986,30 @@
             public int?[]? ArrayLength { get; }
             public bool IsConst { get; }
             public bool IsPublic { get; }
-            public VariableDeclarationNode(ValueType type, string name, AstNode expression, 
-                bool isArray = false, int?[]? arrayLength = null, bool isConst = false, bool isPublic = false)
+            public ValueType InnerType { get; }
+            public VariableDeclarationNode(ValueType type, string name, AstNode expression, bool isArray = false, 
+                int?[]? arrayLength = null, bool isConst = false, bool isPublic = false, ValueType? innerType = null)
             {
                 Type = type;
-                Name = name;
+                Name = name.Length < 200 ? name : "_";
                 Expression = expression;
                 IsArray = isArray;
                 ArrayLength = arrayLength;
                 IsConst = isConst;
                 IsPublic = isPublic;
+                InnerType = innerType ?? (type is ValueType.Nullable or ValueType.IntPtr ? ValueType.Object : type);
             }
 
             public override object Evaluate(ExecutionContext context)
             {
                 context.Check();
                 var value = Expression.Evaluate(context);
+                if (Type == ValueType.Object && value is int pointer && context.GetHeapObjectType(pointer) == ValueType.Struct)
+                {
+                    context.Declare(Name, ValueType.Struct, value);
+                    return null!;
+                }
+                if (Type == ValueType.Nullable && InnerType != Type && value is not null) value = context.Cast(value, InnerType);
                 if (IsArray)
                 {
                     if (value is ValueTuple<object?[], ValueType> arr)
@@ -4244,9 +5040,8 @@
                             }
                         }
 
-                        context.Declare(Name, ValueType.Array, (vals.Length, elemT));
-                        context.WriteVariable(Name, basePtr);
-                        return null;
+                        context.Declare(Name, ValueType.Array, basePtr);
+                        return null!;
                     }
                     else if (value is ValueTuple<int, ValueType> info)
                     {
@@ -4315,6 +5110,19 @@
                     }
                 }
                 leave:
+                if (!context.HasVariable(resolved) && context.HasVariable("this") && context.Get("this").Type == Ast.ValueType.Struct)
+                {
+                    int instPtr = Convert.ToInt32(context.ReadVariable("this"));
+                    try
+                    {
+                        int off = context.GetStructFieldOffset(instPtr, Name, out var vt) + 1;
+                        return Ast.IsReferenceType(vt)
+                            ? context.DerefReference(instPtr + off, vt)!
+                            : context.ReadFromStack(instPtr + off, vt);
+                    }
+                    catch
+                    { }
+                }
                 var v = context.Get(resolved);
                 if (IsReferenceType(v.Type))
                 {
@@ -4327,7 +5135,14 @@
                         if (len < 0) len = span.Length;
                         return context.ReadHeapString(span.Slice(0, len));
                     }
-                    if (v.Type == ValueType.Array) return ptr; 
+                    if (v.Type == ValueType.Nullable)
+                    {
+                        var baseType = (ValueType)context.RawMemory[ptr];
+                        int size = context.GetTypeSize(baseType);
+                        return context.ReadFromMemorySlice(context.RawMemory[(ptr + 1)..(ptr + 1 + size)], baseType);
+                    }
+                    if (v.Type == ValueType.Array) return ptr;
+                    if (v.Type == ValueType.Struct) return ptr;
                     if (v.Type == ValueType.Object) return BitConverter.ToInt32(context.GetSpan(ptr));
                     throw new ApplicationException($"Reading object: {v.Type}");
                 }
@@ -4336,39 +5151,6 @@
             public override void Print(string indent = "", bool isLast = true)
             {
                 Console.WriteLine($"{indent}└── var {Name}");
-            }
-        }
-        public class AssignmentNode : AstNode
-        {
-            public string Name { get; }
-            public AstNode Expression { get; }
-
-            public AssignmentNode(string name, AstNode expression)
-            {
-                Name = name;
-                Expression = expression;
-            }
-
-            public override object Evaluate(ExecutionContext context)
-            {
-                context.Check();
-                var variable = context.Get(Name);
-                var value = Expression.Evaluate(context);
-
-                if (!TypeMatches(value, variable.Type))
-                    throw new Exception($"Cannot assign value of incompatible type to '{Name}'");
-
-                context.WriteVariable(Name, value);
-                return null;
-            }
-
-            private bool TypeMatches(object value, ValueType type) =>
-                MatchVariableType(value, type);
-            public override void Print(string indent = "", bool isLast = true)
-            {
-                Console.WriteLine($"{indent}└── assign {Name}");
-                string childIndent = indent + (isLast ? "    " : "│   ");
-                Expression.Print(childIndent, true);
             }
         }
         public class NewArrayNode : AstNode
@@ -4458,8 +5240,8 @@
                 if (!MatchVariableType(value, vt))
                     value = context.Cast(value, vt);
 
-                if (context.InferType(value) != context.GetHeapObjectType(basePtr)) 
-                    throw new ApplicationException($"Type missmatch during indexing: {context.GetHeapObjectType(basePtr)} -> {context.InferType(value)}");
+                if (ExecutionContext.InferType(value) != context.GetHeapObjectType(basePtr)) 
+                    throw new ApplicationException($"Type missmatch during indexing: {context.GetHeapObjectType(basePtr)} -> {ExecutionContext.InferType(value)}");
                 
                 if (Ast.IsReferenceType(vt)) 
                 { 
@@ -4467,30 +5249,8 @@
                     BitConverter.GetBytes(handle).CopyTo(context.RawMemory, addr); 
                     return; 
                 }
-                ReadOnlySpan<byte> src;
-                if (value is int i) src = BitConverter.GetBytes(i);
-                else if (value is char c) src = BitConverter.GetBytes(c);
-                else if (value is uint ui) src = BitConverter.GetBytes(ui);
-                else if (value is ulong ul) src = BitConverter.GetBytes(ul);
-                else if (value is long l) src = BitConverter.GetBytes(l);
-                else if (value is float f) src = BitConverter.GetBytes(f);
-                else if (value is double d) src = BitConverter.GetBytes(d);
-                else if (value is short s) src = BitConverter.GetBytes(s);
-                else if (value is ushort us) src = BitConverter.GetBytes(us);
-                else if (value is byte b) src = new[] { b };
-                else if (value is sbyte sb) src = new[] { unchecked((byte)sb) };
-                else if (value is decimal m)
-                {
-                    int[] bits = decimal.GetBits(m);
-                    Span<byte> bytes = stackalloc byte[16];
-
-                    for (int j = 0; j < 4; j++)
-                    {
-                        BitConverter.GetBytes(bits[j]).CopyTo(bytes.Slice(j * 4));
-                    }
-                    src = new ReadOnlySpan<byte>(bytes.ToArray());
-                }
-                else throw new ApplicationException($"Unknown type while writing to array index: {value.GetType()}");
+                
+                ReadOnlySpan<byte> src = context.GetSourceBytes(value);
                 context.ValidateAddress(addr, src.Length);
                 src.CopyTo(context.RawMemory.AsSpan(addr, src.Length));
             }
@@ -5093,7 +5853,7 @@
                     }
                 }
 
-                return null;
+                return null!;
             }
             public override void Print(string indent = "", bool isLast = true)
             {
@@ -5121,14 +5881,14 @@
                 context.EnterScope();
                 try
                 {
-                    object result = null;
+                    object? result = null;
                     foreach (var statement in Statements)
                     {
                         context.Check();
                         var res = statement.Evaluate(context);
                         if (res is ReturnSignal or BreakSignal or ContinueSignal) return res;
                     }
-                    return result;
+                    return result!;
                 }
                 finally
                 {
@@ -5239,9 +5999,13 @@
                             var call = new CallNode(member, new AstNode[] { new VariableReferenceNode(varName) });
                             return call.Evaluate(context);
                         }
-
-                        throw new ApplicationException(
-                            $"No native function '{member}' for variable '{varName}' found");
+                        if (context.Get(varName).Type == ValueType.Struct)
+                        {
+                            int ptr = Convert.ToInt32(target);
+                            int off = context.GetStructFieldOffset(ptr, member, out var vt) + 1;
+                            return IsReferenceType(vt) ? context.DerefReference(ptr + off, vt)! : context.ReadFromStack(ptr + off, vt);
+                        }
+                        throw new ApplicationException($"No native function '{member}' for variable '{varName}' found");
 
                     }
                 }
@@ -5382,13 +6146,13 @@
                                 int id = ctx.AddObject(ret);
                                 return (id, isObject: true);
                             }
-                            return ret;
+                            return ret!;
                         }
-                        catch (Exception e) { inFuncException = e.ToString(); }
+                        catch (Exception e) { inFuncException = FormatExceptionForUser(e, frameLimit: 2, innerLimit: 1); }
                         finally { ctx.ExitFunction(); }
                     }
-                    throw new ApplicationException($"No native overload '{Name}' matches given arguments ({string.Join(", ", argVals.Select(x => x.GetType().ToString()))})" +
-                        $"{(inFuncException is not null ? $"\n{inFuncException}" : "")}");
+                    throw new ApplicationException( (inFuncException is null ? $"No native overload '{Name}' matches given arguments " +
+                        $"({string.Join(", ", argVals.Select(x => x?.GetType()?.ToString() ?? "null"))})" : $"Exception in {Name}\n{inFuncException}"));
                 }
                 
                 if (!TryResolve(Name, ctx, out string qName, out var overloads2))
@@ -5457,7 +6221,7 @@
                     {
                         ctx.Unpin(rsignal.PinKey);
                     }
-                    return result;
+                    return result!;
                 }
                 finally { ctx.ExitFunction(); ctx.CurrentNameSpace = savedNs; }
             }
@@ -5563,6 +6327,56 @@
                     Console.WriteLine($"{childIndent}└── {m}");
             }
         }
+        
+        public class ConstructorDeclarationNode : Ast.AstNode
+        {
+            public readonly string StructName;
+            public readonly string[] ParamNames;
+            public readonly Ast.ValueType[] ParamTypes;
+            public readonly Ast.AstNode?[] DefaultValues;
+            public readonly Ast.AstNode Body;
+            public readonly string[] Modifiers;
+            public readonly Initializer? CtorInitializer;
+
+            public readonly record struct Initializer(string Kind, Ast.AstNode[] Args);
+
+            public ConstructorDeclarationNode(string structName,string[] paramNames,Ast.ValueType[] paramTypes, Ast.AstNode?[] defaultValues, 
+                Ast.AstNode body,IEnumerable<string>? modifiers = null,Initializer? initializer = null)
+            {
+                StructName = structName;
+                ParamNames = paramNames;
+                ParamTypes = paramTypes;
+                DefaultValues = defaultValues;
+                Body = body;
+                Modifiers = (modifiers ?? Array.Empty<string>()).ToArray();
+                CtorInitializer = initializer;
+            }
+
+            public override object Evaluate(Ast.ExecutionContext context)
+            {
+                context.Check();
+                var fn = new ExecutionContext.Function
+                {
+                    ReturnType = ValueType.Object,
+                    ParamNames = ParamNames,
+                    ParamTypes = ParamTypes,
+                    DefaultValues = DefaultValues,
+                    Body = Body,
+                    Attributes = Array.Empty<AttributeNode>(),
+                    IsPublic = Modifiers.Contains("public"),
+
+                };
+                string key = $"__ctor__:{StructName}";
+                context.AddFunction(key, fn);
+                return null!;
+            }
+
+            public override void Print(string indent = "", bool last = true)
+            {
+                Console.WriteLine($"{indent}└── ctor {StructName}({string.Join(", ", ParamNames)})");
+                Body.Print(indent + (last ? "    " : "│   "), true);
+            }
+        }
         public class StructDeclarationNode : AstNode
         {
             public string Name { get; }
@@ -5574,9 +6388,48 @@
                 Modifiers = modifiers.ToArray();
                 Members = members.ToArray();
             }
-            public override object? Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext ctx)
             {
-                return null;
+                var fields = Members.OfType<VariableDeclarationNode>().ToList();
+                if (fields.Count == 0) return null!;
+                var buf = new List<byte>();
+                foreach (var f in fields)
+                {
+                    buf.Add((byte)f.Type);
+                    byte[] nameBytes = Encoding.UTF8.GetBytes(f.Name);
+                    if (nameBytes.Length > 255) throw new ApplicationException("Field name is too long");
+                    buf.Add((byte)nameBytes.Length);
+                    buf.AddRange(nameBytes);
+                    bool hasInitExpr = f.Expression is not Ast.LiteralNode lit || lit.Value != null;
+                    if (hasInitExpr)
+                    {
+                        object val = f.Expression.Evaluate(ctx);
+                        if (!Ast.MatchVariableType(val, f.Type) && f.Type != Ast.ValueType.Object)
+                            val = ctx.Cast(val, f.Type);
+
+                        buf.Add(1); // hasInit = true
+                        if (Ast.IsReferenceType(f.Type))
+                        {
+                            int fieldPtr = val is int pi ? pi : ctx.PackReference(val, f.Type);
+                            buf.AddRange(BitConverter.GetBytes(fieldPtr));
+                        }
+                        else
+                        {
+                            ReadOnlySpan<byte> src = ctx.GetSourceBytes(f.Type, val);
+                            buf.AddRange(src.ToArray());
+                        }
+                    }
+                    else
+                    {
+                        buf.Add(0); // hasInit = false
+                    }
+                }
+                int ptr = ctx.Malloc(buf.Count, ValueType.Byte);
+                ctx.WriteBytes(ptr, buf.ToArray());
+                ctx.Declare(Name, ValueType.IntPtr, ptr);
+                foreach (var ctor in Members.OfType<ConstructorDeclarationNode>())
+                    ctor.Evaluate(ctx);
+                return ptr;
             }
             public override void Print(string indent = "", bool isLast = true)
             {
@@ -5586,6 +6439,141 @@
                     Members[i].Print(child, i == Members.Length - 1);
             }
 
+        }
+        public sealed class NewStructNode : Ast.AstNode
+        {
+            private readonly string _structName;
+            public Ast.AstNode[] Args { get; }
+            public NewStructNode(string name, params Ast.AstNode[]? args)
+            {
+                _structName = name;
+                Args = args ?? Array.Empty<Ast.AstNode>();
+            }
+
+            public override object Evaluate(ExecutionContext context)
+            {
+                context.Check();
+
+                if (!context.HasVariable(_structName))
+                    throw new ApplicationException($"{_structName} signature not found");
+
+                int ptr = Convert.ToInt32(context.ReadVariable(_structName));
+
+                int sigLen = context.GetHeapObjectLength(ptr);
+                int pos = 0;
+                var fieldTypes = new List<ValueType>();
+                var initBytes = new List<byte[]?>();
+                while (pos < sigLen)
+                {
+                    var vt = (ValueType)context.RawMemory[ptr + pos++];
+                    int nameLen = context.RawMemory[ptr + pos++];
+                    pos += nameLen;//skip name
+                    byte hasInit = context.RawMemory[ptr + pos++];
+                    byte[]? init = null;
+                    if (hasInit == 1)
+                    {
+                        int sz = context.GetTypeSize(vt);
+                        init = new byte[sz];
+                        Buffer.BlockCopy(context.RawMemory, ptr + pos, init, 0, sz);
+                        pos += sz;
+                    }
+                    fieldTypes.Add(vt);
+                    initBytes.Add(init);
+                }
+
+                int instPtr = context.Malloc(4 + fieldTypes.Sum(vt => 1 + context.GetTypeSize(vt)), ValueType.Struct);
+                BitConverter.GetBytes(ptr).CopyTo(context.RawMemory, instPtr);
+                int offset = 4;
+                for (int i = 0; i < fieldTypes.Count; i++)
+                {
+                    var vt = fieldTypes[i];
+                    context.RawMemory[instPtr + offset++] = (byte)vt;
+                    var span = context.RawMemory.AsSpan(instPtr + offset, context.GetTypeSize(vt));
+                    var init = initBytes[i];
+                    if (init is not null)
+                    {
+                        init.CopyTo(span);
+                    }
+                    else
+                    {
+                        span.Fill(Ast.IsReferenceType(vt) ? (byte)0xFF : (byte)0x00);
+                    }
+                    offset += span.Length;
+                }
+                object[] argVals = Args.Select(a => a.Evaluate(context)).ToArray();
+                string key = $"__ctor__:{_structName}";
+
+                if (context.Functions.TryGetValue(key, out var ctors) && ctors.Count > 0)
+                {
+                    ExecutionContext.Function? best = null;
+                    int bestScore = int.MinValue;
+                    foreach (var c in ctors)
+                    {
+                        if (argVals.Length > c.ParamTypes.Length) continue;
+                        bool defaultsOk = true;
+                        for (int i = argVals.Length; i < c.ParamTypes.Length; i++)
+                            if (c.DefaultValues[i] is null) { defaultsOk = false; break; }
+                        if (!defaultsOk) continue;
+                        int score = 0;
+                        bool ok = true;
+                        for (int i = 0; i < argVals.Length; i++)
+                        {
+                            var pt = c.ParamTypes[i];
+                            var av = argVals[i];
+                            var at = ExecutionContext.InferType(av);
+                            if (at.Equals(pt)) score += 2;
+                            else
+                            {
+                                try { _ = context.Cast(av, pt); score += 1; }
+                                catch { ok = false; break; }
+                            }
+                        }
+                        if (!ok) continue;
+                        int tieBreak = -c.ParamTypes.Length;
+                        int finalScore = (score << 8) | (tieBreak & 0xFF);
+                        if (finalScore > bestScore) { bestScore = finalScore; best = c; }
+                    }
+                    if (best.HasValue)
+                    {
+                        var ctor = best.Value; 
+                        context.EnterFunction();
+                        context.EnterScope();
+                        try
+                        {
+                            context.Declare("this", ValueType.Struct, instPtr);
+
+                            for (int i = 0; i < ctor.ParamNames.Length; i++)
+                            {
+                                object val;
+                                if (i < argVals.Length) val = argVals[i];
+                                else val = ctor.DefaultValues[i]!.Evaluate(context);
+
+                                if (!MatchVariableType(val, ctor.ParamTypes[i]))
+                                    val = context.Cast(val, ctor.ParamTypes[i]);
+
+                                context.Declare(ctor.ParamNames[i], ctor.ParamTypes[i], val);
+                            }
+                            
+
+                            _ = ctor.Body.Evaluate(context);
+                        }
+                        finally
+                        {
+                            context.ExitScope();
+                            context.ExitFunction();
+                        }
+                    }
+                }
+                return instPtr;
+            }
+
+            public override void Print(string indent = "", bool last = true) 
+            {
+                Console.WriteLine($"{indent}└── new {_structName}({(Args.Length == 0 ? "" : "...")})"); 
+                string childIndent = indent + (last ? "    " : "│   ");
+                for (int i = 0; i < Args.Length; i++)
+                    Args[i].Print(childIndent, i == Args.Length - 1);
+            }
         }
         public class ClassDeclarationNode : AstNode
         {
