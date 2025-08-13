@@ -6,6 +6,7 @@
     using System.Runtime.InteropServices;
     using System.Text;
 
+    #region Example
     /*
     internal class Program
     {
@@ -20,6 +21,7 @@
         }
     }
     */
+    #endregion
 
     #region Parser
     public class Parser
@@ -492,7 +494,6 @@
                             Ast.AstNode expr;
                             if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new")
                             {
-                                // Посмотрим, это target-typed new?
                                 int p = _lexer.Position; var t = _lexer.CurrentTokenType; var s = _lexer.CurrentTokenText;
                                 _lexer.NextToken();
                                 bool target = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
@@ -529,9 +530,9 @@
                     case "using": return ParseUsing();
                     case "const": return ParseConstDeclaration();
                     case "enum": return ParseEnumDeclaration();
+                    case "class": return ParseClassDeclaration();
                     case "struct": return ParseStructDeclaration();
                     case "interface": return ParseInterfaceDeclaration();
-                    case "class": return ParseClassDeclaration();
                     case "namespace": return ParseNamespaceDeclaration();
                 }
             }
@@ -610,7 +611,7 @@
             return exprStatement;
         }
         #region Struct helpers
-        private bool LooksLikeStructConstructor(string structName)
+        private bool LooksLikeConstructor(string structName)
         {
             int savePos = _lexer.Position;
             var saveType = _lexer.CurrentTokenType;
@@ -803,7 +804,6 @@
         {
             _lexer.NextToken();
 
-            // полное имя вида A.B.C
             var sb = new StringBuilder();
             sb.Append(_lexer.CurrentTokenText);
             Consume(Ast.TokenType.Identifier);
@@ -1447,7 +1447,7 @@
 
         #endregion
         #region Structure objects parser
-        private Ast.AstNode ParseStructConstructor(string structName)
+        private Ast.AstNode ParseConstructor(string structName)
         {
             var mods = new List<string>();
             while (IsStructModifier())
@@ -1459,7 +1459,7 @@
             string ident = _lexer.CurrentTokenText;
             Consume(Ast.TokenType.Identifier);
             if (!string.Equals(ident, structName, StringComparison.Ordinal))
-                throw new ApplicationException($"Ожидается конструктор '{structName}'.");
+                throw new ApplicationException($"Constructor expected '{structName}'.");
 
             //params
             Consume(Ast.TokenType.ParenOpen);
@@ -1508,7 +1508,7 @@
             {
                 _lexer.NextToken(); // ':'
                 if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword || _lexer.CurrentTokenType == Ast.TokenType.Identifier))
-                    throw new ApplicationException("Ожидается 'this' или 'base' после ':'");
+                    throw new ApplicationException("Expecteed this or base after ':'");
                 string kind = _lexer.CurrentTokenText; //this or base
                 _lexer.NextToken();
                 Consume(Ast.TokenType.ParenOpen);
@@ -1542,30 +1542,8 @@
 
             return new Ast.ConstructorDeclarationNode(structName, paramNames.ToArray(), paramTypes.ToArray(), defaultVals.ToArray(), body, mods, init);
         }
-        private Ast.AstNode ParseClassDeclaration(IList<string>? mods = null)
-        {
-            _lexer.NextToken(); // skip class
-            string name = _lexer.CurrentTokenText;
-            Consume(Ast.TokenType.Identifier);
 
-            if (_lexer.CurrentTokenText == ":") //inheritance
-            {
-                _lexer.NextToken();
-                while (_lexer.CurrentTokenType == Ast.TokenType.Identifier
-                    || _lexer.CurrentTokenType == Ast.TokenType.Keyword)
-                    _lexer.NextToken(); //skip names
-            }
-
-            Consume(Ast.TokenType.BraceOpen);
-            var members = new List<Ast.AstNode>();
-            while (_lexer.CurrentTokenType != Ast.TokenType.BraceClose)
-                members.Add(ParseStatement());
-            Consume(Ast.TokenType.BraceClose);
-
-
-            return new Ast.ClassDeclarationNode(name, mods ?? Array.Empty<string>(), members);
-        }
-
+        private Ast.AstNode ParseClassDeclaration(IList<string>? mods = null) => ParseStructDeclaration(mods);
         private Ast.AstNode ParseInterfaceDeclaration(IList<string>? mods = null)
         {
             _lexer.NextToken(); // skip interface
@@ -1606,8 +1584,8 @@
             var members = new List<Ast.AstNode>();
             while (_lexer.CurrentTokenType != Ast.TokenType.BraceClose)
             {
-                if (LooksLikeStructConstructor(name))
-                    members.Add(ParseStructConstructor(name));
+                if (LooksLikeConstructor(name))
+                    members.Add(ParseConstructor(name));
                 else
                     members.Add(ParseStatement());
             }
@@ -2059,7 +2037,7 @@
             public string PrintMemory(int bytesPerRow = 16, int dataPreview = 64, bool printStack = false)
             {
                 var sb = new System.Text.StringBuilder();
-                Console.WriteLine($"Memory: {_memory.Length / (1024*1024)}Mб {_memory.Length/1024}Кб {_memory.Length%1024}Б");
+                Console.WriteLine($"Memory: {_memory.Length / (1024*1024)}Mb {_memory.Length/1024}Kb {_memory.Length%1024}B");
                 sb.AppendLine("=== STACK ===");
                 if (printStack)
                 {
@@ -2248,7 +2226,7 @@
                     case ValueType.Double: return sizeof(double);
                     case ValueType.Float: return sizeof(float);
                     case ValueType.Decimal: return sizeof(decimal);
-                    case ValueType.Char: return sizeof(decimal);
+                    case ValueType.Char: return sizeof(char);
                     case ValueType.Short: return sizeof(short);
                     case ValueType.UShort: return sizeof(ushort);
                     case ValueType.Byte: return sizeof(byte);
@@ -2388,7 +2366,7 @@
                     _memory[pos + 5] = (byte)vt;
                     */
                     if (len > 0xFFFFFF)
-                        throw new ArgumentOutOfRangeException(nameof(len), "UInt24 диапазон 0‑0xFFFFFF.");
+                        throw new ArgumentOutOfRangeException(nameof(len), "UInt24 range 0‑0xFFFFFF.");
                 }
                 unchecked
                 {
@@ -2439,6 +2417,7 @@
             }
             public int Malloc(int size, ValueType valueType)
             {
+                if (size < 0) throw new ArgumentException(nameof(size), "Allocation length must be positive");
                 int need = size + HeaderSize;
                 int addr = FindFreeBlock(need, valueType);
                 if (addr >= 0) return addr;
@@ -2502,7 +2481,9 @@
             }
             private int FindFreeBlock(int need, ValueType? requested = null)
             {
-                int pos = 0;
+                if (_heapend + need > _memory.Length - StackSize)
+                    throw new OutOfMemoryException();
+                int pos = 0; 
                 while (pos < _heapend)
                 {
                     int len = GetHeapObjectLength(pos + StackSize+HeaderSize)+HeaderSize;
@@ -2522,17 +2503,6 @@
                             WriteHeader(pos + StackSize, need, vt, true);
                             WriteHeader(pos + need + StackSize, len - need, ValueType.IntPtr, false);
                             return pos + HeaderSize + StackSize;
-                        }
-                        else if(false) //if not enough space to fit header
-                        {
-                            WriteHeader(pos + StackSize, len, vt, true);
-                            int tail = len - need;
-                            if (tail > 0)
-                            {
-                                int tailStart = pos + StackSize + need;
-                                _memory.AsSpan(tailStart, tail).Fill(Ast.IsReferenceType(vt) ? (byte)0xFF : (byte)0x00);
-                            }
-
                         }
 
 
@@ -2632,12 +2602,14 @@
             }
             public int ArrayResize(int oldPtr, int newLength)
             {
-                
+                if (newLength < 0) throw new ArgumentException(nameof(newLength), "Length must be positive");
                 if (oldPtr < StackSize || oldPtr >= _memory.Length - sizeof(int))
-                    throw new ArgumentOutOfRangeException(nameof(oldPtr), $"nullptr");
+                    throw new ArgumentOutOfRangeException(nameof(oldPtr), "nullptr");
                 var elemType = GetHeapObjectType(oldPtr);
                 int elemSize = GetTypeSize(elemType);
                 int oldBytes = GetHeapObjectLength(oldPtr);
+                if (elemSize <= 0 || oldBytes % elemSize != 0)
+                    throw new ApplicationException("Corrupted array header");
                 int oldLength = oldBytes / elemSize;
                 int requiredBytes = checked(newLength * elemSize);
 
@@ -2645,8 +2617,28 @@
                     return oldPtr;
 
                 int newPtr = Malloc(requiredBytes, elemType);
-                _memory.AsSpan(oldPtr, oldBytes).CopyTo(_memory.AsSpan(newPtr, oldBytes));
-                _memory.AsSpan(newPtr + oldBytes, requiredBytes - oldBytes).Clear();
+                int copyBytes = Math.Min(oldBytes, requiredBytes);
+                if (copyBytes > 0)
+                    _memory.AsSpan(oldPtr, copyBytes).CopyTo(_memory.AsSpan(newPtr, copyBytes));
+                if (requiredBytes > oldBytes)
+                {
+                    var tail = _memory.AsSpan(newPtr + oldBytes, requiredBytes - oldBytes);
+                    if (IsReferenceType(elemType))
+                        tail.Fill(0xFF);
+                    else
+                        tail.Clear();
+                }
+                else
+                {
+                    if (elemType == ValueType.Object)
+                    {
+                        for (int i = newLength; i < oldLength; i++)
+                        {
+                            int handle = BitConverter.ToInt32(_memory, oldPtr + i * sizeof(int));
+                            if (handle > 0) ReleaseObject(handle);
+                        }
+                    }
+                }
                 Free(oldPtr);
                 return newPtr;
             }
@@ -3535,7 +3527,7 @@
 
                     dataOffs += 1 + GetTypeSize(vt);
                 }
-                throw new ApplicationException($"Поле '{field}' не найдено");
+                throw new ApplicationException($"Field '{field}' not found");
             }
             public void WriteStructField(int instPtr, string field, object value)
             {
@@ -3661,6 +3653,7 @@
                     Ensure(1); buf[w++] = LSB;
                     for (int i = 0; i < len; i++)
                     {
+                        Check();
                         if (i != 0) { Ensure(1); buf[w++] = COM; }
                         if (!Ast.IsReferenceType(et))
                         {
@@ -3734,6 +3727,7 @@
                     int fields = 0;
                     while (s < sigLen)
                     {
+                        Check();
                         if (fields++ >= MaxStructFields) throw new ApplicationException("Too many struct fields");
                         Ast.ValueType fieldType = (Ast.ValueType)sig[s++]; 
                         if (s >= sigLen) break;
@@ -3783,9 +3777,371 @@
                     System.Buffers.ArrayPool<byte>.Shared.Return(buf);
                 }
             }
-            public int DeserializeJson(int ptr, string typeName)
+            public int DeserializeJson(int ptr)
             {
-                return -1;
+                string text = ReadHeapString(ptr);
+                if (string.IsNullOrWhiteSpace(text)) return -1;
+                int i = 0;
+                char Peek() => i < text.Length ? text[i] : '\0';
+                char Next() => i < text.Length ? text[i++] : '\0';
+                void SkipWs() { while (i < text.Length && char.IsWhiteSpace(text[i])) i++; }
+                bool Consume(char c) { SkipWs(); if (Peek() == c) { i++; return true; } return false; }
+                void Expect(char c) { SkipWs(); if (Next() != c) throw new ApplicationException($"Expected '{c}' at {i}"); }
+                string ParseString()
+                {
+                    SkipWs();
+                    if (Next() != '\"') throw new ApplicationException($"Expected string at {i}");
+                    var sb = new StringBuilder();
+                    while (true)
+                    {
+                        Check();
+                        if (i >= text.Length) throw new ApplicationException("Unterminated string");
+                        char c = Next();
+                        if (c == '\"') break;
+                        if (c != '\\') { sb.Append(c); continue; }
+                        if (i >= text.Length) throw new ApplicationException("Bad escape");
+                        c = Next();
+                        switch (c)
+                        {
+                            case '\"': sb.Append('\"'); break;
+                            case '\\': sb.Append('\\'); break;
+                            case '/': sb.Append('/'); break;
+                            case 'b': sb.Append('\b'); break;
+                            case 'f': sb.Append('\f'); break;
+                            case 'n': sb.Append('\n'); break;
+                            case 'r': sb.Append('\r'); break;
+                            case 't': sb.Append('\t'); break;
+                            case 'u':
+                                if (i + 4 > text.Length) throw new ApplicationException("Bad \\u escape");
+                                ushort code = Convert.ToUInt16(text.Substring(i, 4), 16);
+                                sb.Append((char)code);
+                                i += 4;
+                                break;
+                            default: throw new ApplicationException($"Bad escape '\\{c}'");
+                        }
+                    }
+                    return sb.ToString();
+                }
+                object? ParseNumber()
+                {
+                    SkipWs();
+                    int start = i;
+                    if (Peek() == '-') i++;
+                    bool hasDot = false, hasExp = false;
+                    while (i < text.Length)
+                    {
+                        Check();
+                        char c = text[i];
+                        if (char.IsDigit(c)) { i++; continue; }
+                        if (c == '.' && !hasDot) { hasDot = true; i++; continue; }
+                        if ((c == 'e' || c == 'E') && !hasExp)
+                        {
+                            hasExp = true; i++;
+                            if (i < text.Length && (text[i] == '+' || text[i] == '-')) i++;
+                            continue;
+                        }
+                        break;
+                    }
+                    string num = text.Substring(start, i - start);
+                    if (!hasDot && !hasExp)
+                    {
+                        if (long.TryParse(num, NumberStyles.Integer, CultureInfo.InvariantCulture, out long l))
+                        {
+                            if (l >= int.MinValue && l <= int.MaxValue) return (int)l;
+                            return l;
+                        }
+                    }
+                    double d = double.Parse(num, CultureInfo.InvariantCulture);
+                    return d;
+                }
+                List<object?> ParseArray()
+                {
+                    Expect('[');
+                    var list = new List<object?>();
+                    SkipWs();
+                    if (Consume(']')) return list;
+                    while (true)
+                    {
+                        Check();
+                        list.Add(ParseValue());
+                        SkipWs();
+                        if (Consume(']')) break;
+                        Expect(',');
+                    }
+                    return list;
+                }
+                object? ParseValue()
+                {
+                    SkipWs();
+                    char c = Peek();
+                    if (c == '\"') return ParseString();
+                    if (c == '{') return ParseObject();
+                    if (c == '[') return ParseArray();
+                    if (c == 't') { if (text.Substring(i, System.Math.Min(4, text.Length - i)) != "true") throw new ApplicationException("Expected true"); i += 4; return true; }
+                    if (c == 'f') { if (text.Substring(i, System.Math.Min(5, text.Length - i)) != "false") throw new ApplicationException("Expected false"); i += 5; return false; }
+                    if (c == 'n') { if (text.Substring(i, System.Math.Min(4, text.Length - i)) != "null") throw new ApplicationException("Expected null"); i += 4; return null; }
+                    return ParseNumber();
+                }
+                List<(string Key, object? Val)> ParseObject()
+                {
+                    Expect('{');
+                    var obj = new System.Collections.Generic.List<(string, object?)>();
+                    SkipWs();
+                    if (Consume('}')) return obj;
+                    while (true)
+                    {
+                        Check();
+                        string key = ParseString();
+                        Expect(':');
+                        object? val = ParseValue();
+                        obj.Add((key, val));
+                        SkipWs();
+                        if (Consume('}')) break;
+                        Expect(',');
+                    }
+                    return obj;
+                }
+                int MakeNullable(ValueType baseType, object? value)
+                {
+                    if (value is null) return -1;
+                    int bytes = 1 + GetTypeSize(baseType);
+                    int p = Malloc(bytes, ValueType.Nullable);
+                    RawMemory[p] = (byte)baseType;
+                    ReadOnlySpan<byte> src = GetSourceBytes(baseType, Cast(value, baseType));
+                    src.CopyTo(RawMemory.AsSpan(p + 1, bytes - 1));
+                    return p;
+                }
+
+                ValueType InferScalarType(object v)
+                {
+                    return v switch
+                    {
+                        int => ValueType.Int,
+                        long => ValueType.Long,
+                        double => ValueType.Double,
+                        bool => ValueType.Bool,
+                        string => ValueType.String,
+                        _ => ValueType.Object
+                    };
+                }
+                int BuildObject(List<(string Key, object? Val)> fields)
+                {
+                    var names = fields;
+                    var declTypes = new List<ValueType>(names.Count);
+                    var instTypes = new List<ValueType>(names.Count);
+                    var payloads = new List<object?>(names.Count);
+
+                    foreach (var (k, v) in names)
+                    {
+                        if (v is null)
+                        {
+                            declTypes.Add(ValueType.Object);
+                            instTypes.Add(ValueType.Object);
+                            payloads.Add(-1);
+                            continue;
+                        }
+
+                        switch (v)
+                        {
+                            case string s:
+                                declTypes.Add(ValueType.String);
+                                instTypes.Add(ValueType.String);
+                                payloads.Add(PackReference(s, ValueType.String));
+                                break;
+
+                            case bool b:
+                                declTypes.Add(ValueType.Bool);
+                                instTypes.Add(ValueType.Bool);
+                                payloads.Add(b);
+                                break;
+
+                            case int or long or double:
+                                {
+                                    var t = InferScalarType(v);
+                                    declTypes.Add(t);
+                                    instTypes.Add(t);
+                                    payloads.Add(v);
+                                    break;
+                                }
+
+                            case List<object?> arr:
+                                {
+                                    int ap = BuildArray(arr, out var elemHeaderType);
+                                    declTypes.Add(ValueType.Array);
+                                    instTypes.Add(ValueType.Array);
+                                    payloads.Add(ap);
+                                    break;
+                                }
+
+                            case List<(string Key, object? Val)> obj:
+                                {
+                                    int sp = BuildObject(obj);
+                                    declTypes.Add(ValueType.Struct);
+                                    instTypes.Add(ValueType.Struct);
+                                    payloads.Add(sp);
+                                    break;
+                                }
+
+                            default:
+                                throw new ApplicationException($"Struct: unsupported value type {v.GetType()}");
+                        }
+                    }
+
+                    var sigBuf = new List<byte>();
+                    for (int idx = 0; idx < names.Count; idx++)
+                    {
+                        Check();
+                        ValueType vt = declTypes[idx];
+                        sigBuf.Add((byte)vt);
+                        byte[] nameBytes = System.Text.Encoding.UTF8.GetBytes(names[idx].Key);
+                        if (nameBytes.Length > 255) throw new ApplicationException("Field name too long");
+                        sigBuf.Add((byte)nameBytes.Length);
+                        sigBuf.AddRange(nameBytes);
+                        sigBuf.Add(0);
+                    }
+                    int sigPtr = Malloc(sigBuf.Count, ValueType.Byte);
+                    WriteBytes(sigPtr, sigBuf.ToArray());
+
+                    int total = 4;
+                    for (int idx = 0; idx < declTypes.Count; idx++)
+                        total += 1 + GetTypeSize(declTypes[idx]);
+                    int instPtr = Malloc(total, ValueType.Struct);
+                    BitConverter.GetBytes(sigPtr).CopyTo(RawMemory, instPtr);
+                    int pos = instPtr + 4;
+                    for (int idx = 0; idx < declTypes.Count; idx++)
+                    {
+                        Check();
+                        RawMemory[pos++] = (byte)instTypes[idx];
+                        var declared = declTypes[idx];
+                        if (IsReferenceType(declared))
+                        {
+                            int refVal = payloads[idx] is int pval ? pval : PackReference(payloads[idx], declared);
+                            BitConverter.GetBytes(refVal).CopyTo(RawMemory, pos);
+                        }
+                        else
+                        {
+                            ReadOnlySpan<byte> src = GetSourceBytes(declared, payloads[idx]!);
+                            src.CopyTo(RawMemory.AsSpan(pos, src.Length));
+                        }
+                        pos += GetTypeSize(declared);
+                    }
+                    return instPtr;
+                }
+                int BuildArray(List<object?> items, out ValueType elemHeaderType)
+                {
+                    bool anyNull = false, anyStr = false, anyBool = false, anyArr = false, anyObj = false;
+                    bool anyDouble = false, anyLong = false, anyInt = false;
+                    foreach (var v in items)
+                    {
+                        Check();
+                        if (v is null) { anyNull = true; continue; }
+                        switch (v)
+                        {
+                            case string: anyStr = true; break;
+                            case bool: anyBool = true; break;
+                            case double: anyDouble = true; break;
+                            case long: anyLong = true; break;
+                            case int: anyInt = true; break;
+                            case List<object?>: anyArr = true; break;
+                            case List<(string Key, object? Val)>: anyObj = true; break;
+                            default: throw new ApplicationException($"Array: unsupported element {v.GetType()}");
+                        }
+                    }
+
+                    int cats = (anyStr ? 1 : 0) + (anyBool ? 1 : 0) + ((anyInt || anyLong || anyDouble) ? 1 : 0) + (anyArr ? 1 : 0) + (anyObj ? 1 : 0);
+                    if (cats > 1) throw new ApplicationException("Array: heterogeneous arrays are not supported");
+
+                    if (anyStr) elemHeaderType = ValueType.String;
+                    else if (anyBool && !(anyInt || anyLong || anyDouble) && !anyArr && !anyObj) elemHeaderType = anyNull ? ValueType.Nullable : ValueType.Bool;
+                    else if (anyArr) elemHeaderType = ValueType.Array;
+                    else if (anyObj) elemHeaderType = ValueType.Struct;
+                    else if (anyInt || anyLong || anyDouble)
+                    {
+                        elemHeaderType = anyDouble ? ValueType.Double : (anyLong ? ValueType.Long : ValueType.Int);
+                        if (anyNull) elemHeaderType = ValueType.Nullable;
+                    }
+                    else
+                    {
+                        elemHeaderType = ValueType.Object;
+                    }
+
+                    int n = items.Count;
+
+                    if (elemHeaderType == ValueType.Nullable)
+                    {
+                        int baseType = (anyStr || anyArr || anyObj) ? (int)ValueType.Object
+                                    : (anyDouble ? (int)ValueType.Double
+                                    : (anyLong ? (int)ValueType.Long
+                                    : (anyBool ? (int)ValueType.Bool : (int)ValueType.Int)));
+                        if ((ValueType)baseType == ValueType.Object || (ValueType)baseType == ValueType.String)
+                            throw new ApplicationException("Array: nullable supported only for value types");
+
+                        int basePtr = Malloc(sizeof(int) * n, ValueType.Nullable);
+                        for (int idx = 0; idx < n; idx++)
+                        {
+                            object? v = items[idx];
+                            int np = v is null ? -1 : MakeNullable((ValueType)baseType, v);
+                            BitConverter.GetBytes(np).CopyTo(RawMemory, basePtr + idx * sizeof(int));
+                        }
+                        return basePtr;
+                    }
+
+                    if (IsReferenceType(elemHeaderType))
+                    {
+                        int basePtr = Malloc(sizeof(int) * n, elemHeaderType);
+                        for (int idx = 0; idx < n; idx++)
+                        {
+                            Check();
+                            int cell = basePtr + idx * sizeof(int);
+                            object? v = items[idx];
+                            int p = -1;
+                            if (v is null) p = -1;
+                            else if (elemHeaderType == ValueType.String) p = PackReference((string)v, ValueType.String);
+                            else if (elemHeaderType == ValueType.Array) p = BuildArray((System.Collections.Generic.List<object?>)v, out _);
+                            else if (elemHeaderType == ValueType.Struct) p = BuildObject((System.Collections.Generic.List<(string Key, object? Val)>)v);
+                            else p = -1;
+                            BitConverter.GetBytes(p).CopyTo(RawMemory, cell);
+                        }
+                        return basePtr;
+                    }
+                    else
+                    {
+                        int elemSize = GetTypeSize(elemHeaderType);
+                        int basePtr = Malloc(n * elemSize, elemHeaderType);
+                        for (int idx = 0; idx < n; idx++)
+                        {
+                            Check();
+                            object? v = items[idx];
+                            if (v is null) throw new ApplicationException("Array: null in non nullable value array");
+                            object vv = elemHeaderType switch
+                            {
+                                ValueType.Double => Convert.ToDouble(v, System.Globalization.CultureInfo.InvariantCulture),
+                                ValueType.Long => v is int ii ? (long)ii : Convert.ToInt64(v, System.Globalization.CultureInfo.InvariantCulture),
+                                _ => v
+                            };
+                            ReadOnlySpan<byte> src = GetSourceBytes(elemHeaderType, vv);
+                            src.CopyTo(RawMemory.AsSpan(basePtr + idx * elemSize, elemSize));
+                        }
+                        return basePtr;
+                    }
+                }
+                SkipWs();
+                object? root = ParseValue();
+                SkipWs();
+                if (i != text.Length) throw new ApplicationException("Trailing characters");
+
+                return root switch
+                {
+                    null => -1,
+                    string s => PackReference(s, ValueType.String),
+                    bool b => MakeNullable(ValueType.Bool, b),
+                    int v => MakeNullable(ValueType.Int, v),
+                    long v => MakeNullable(ValueType.Long, v),
+                    double v => MakeNullable(ValueType.Double, v),
+                    List<object?> arr => BuildArray(arr, out _),
+                    List<(string Key, object? Val)> obj => BuildObject(obj),
+                    _ => throw new ApplicationException($"Root unsupported: {root.GetType()}")
+                };
             }
             #endregion
             #endregion
@@ -4043,12 +4399,13 @@
             this.Context.RegisterNative("sizeof", (object o) => { return Context.GetTypeSize(ExecutionContext.InferType(o)); });
             this.Context.RegisterNative("TypeOfPtr", (int ptr) => { return GetTypeByPtr(ptr)?.ToString() ?? "null"; });
             this.Context.RegisterNative("Json.Serialize", (int ptr) => { return Context.SerializeJson(ptr); });
-            this.Context.RegisterNative("Json.Deserialize", (int ptr, string name) => { return Context.DeserializeJson(ptr, name); });
+            this.Context.RegisterNative("Json.Deserialize", (int ptr) => { return Context.DeserializeJson(ptr); });
             this.Context.RegisterNative("Length", (Func<int, int>)Context.GetArrayLength);
             this.Context.RegisterNative("Length", (string str) => str.Length);
             this.Context.RegisterNative("Count", (Func<int, int>)Context.GetArrayLength);
             this.Context.RegisterNative("Resize", (Action<string, int>)Context.ArrayResize);
             this.Context.RegisterNative("Resize", (Func<int, int, int>)Context.ArrayResize);
+            this.Context.RegisterNative("Array.Resize", (Func<int, int, int>)Context.ArrayResize);
             this.Context.RegisterNative("Add", (Action<string, object>)Context.ArrayAdd);
             this.Context.RegisterNative("Add", (Func<int, object, int>)Context.ArrayAdd);
             this.Context.RegisterNative("AddAt", (Action<string, int, object>)Context.ArrayAddAt);
@@ -4106,17 +4463,17 @@
             this.Context.RegisterNative("String.Join", (string separator, int varaiable) => { return Join(separator, varaiable); });
             this.Context.RegisterNative("Join", (int varaiable) => { return Join(", ", varaiable); });
             this.Context.RegisterNative("Random.Next", (Func<int, int, int>)Random.Shared.Next);
-            this.Context.RegisterNative("Next", (Func<int, int, int>)Random.Shared.Next);
-            this.Context.RegisterNative("UtcNow", () => { return DateTime.UtcNow; });
-            this.Context.RegisterNative("TimeNow", () => { return DateTime.Now; });
-            this.Context.RegisterNative("DateTimeParse", (string s) => DateTime.Parse(s, CultureInfo.InvariantCulture));
-            this.Context.RegisterNative("TimeSpanParse", (string s) => TimeSpan.Parse(s, CultureInfo.InvariantCulture));
+            this.Context.RegisterNative("Random.Shared.Next", (Func<int, int, int>)Random.Shared.Next);
+            this.Context.RegisterNative("DateTime.UtcNow", () => { return DateTime.UtcNow; });
+            this.Context.RegisterNative("DateTime.Now", () => { return DateTime.Now; });
+            this.Context.RegisterNative("DateTime.Parse", (string s) => DateTime.Parse(s, CultureInfo.InvariantCulture));
+            this.Context.RegisterNative("TimeSpan.Parse", (string s) => TimeSpan.Parse(s, CultureInfo.InvariantCulture));
             this.Context.RegisterNative("Ticks", (DateTime d) => d.Ticks);
             this.Context.RegisterNative("Ticks", (TimeSpan t) => t.Ticks);
-            this.Context.RegisterNative("DateTimeAdd", (DateTime d, TimeSpan t) => d+t);
-            this.Context.RegisterNative("DateTimeSubtract", (DateTime d, TimeSpan t) => d-t);
-            this.Context.RegisterNative("TimeSpanSubtract", (TimeSpan d, TimeSpan t) => d-t);
-            this.Context.RegisterNative("TimeSpanAdd", (TimeSpan d, TimeSpan t) => d+t);
+            this.Context.RegisterNative("DateTime.Add", (DateTime d, TimeSpan t) => d+t);
+            this.Context.RegisterNative("DateTime.Subtract", (DateTime d, TimeSpan t) => d-t);
+            this.Context.RegisterNative("TimeSpan.Subtract", (TimeSpan d, TimeSpan t) => d-t);
+            this.Context.RegisterNative("TimeSpan.Add", (TimeSpan d, TimeSpan t) => d+t);
             this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object[] callArgs)
                 => InvokeByAttribute(this.Context, attr, attrArgs, callArgs));
             this.Context.RegisterNative("Split", (Func<string, string, int>)Split);
@@ -4192,12 +4549,11 @@
             var sb = new System.Text.StringBuilder(256);
             sb.Append(ex.GetType().Name).Append(": ").AppendLine(ex.Message);
 
-            // Берём стек как текст (может быть null).
             var st = ex.StackTrace;
             if (string.IsNullOrEmpty(st))
                 return sb.Append("  at <no stack trace>").ToString();
 
-            var lines = st.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            var lines = st.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             int shown = 0;
             for (int i = 0; i < lines.Length && shown < frameLimit; i++)
             {
@@ -5171,10 +5527,11 @@
 
                 if (len is int i)
                 {
-                    if (i * context.GetTypeSize(ElementType) >= context.RawMemory.Length - context.StackSize) throw new OutOfMemoryException();
+                    int size = checked(i * context.GetTypeSize(ElementType));
+                    if (size >= context.RawMemory.Length - context.StackSize) throw new OutOfMemoryException();
                     return (i, ElementType);
                 }
-                else return null;
+                else return null!;
             }
 
             public override void Print(string indent = "", bool last = true)
@@ -5634,6 +5991,8 @@
                 }
                 catch (Exception ex)
                 {
+                    if (ex is OperationCanceledException or OutOfMemoryException or StackOverflowException)
+                        throw;
                     context.EnterScope();
                     try
                     {
@@ -5692,12 +6051,12 @@
                         foreach (var stmt in body)
                         {
                             var r = stmt.Evaluate(context);
-                            if (r is BreakSignal) return null; // break from switch
+                            if (r is BreakSignal) return null!;
                             if (r is ContinueSignal or ReturnSignal) return r;
                         }
                     }
                 }
-                return null;
+                return null!;
             }
 
             public override void Print(string indent = "", bool isLast = true)
@@ -5708,9 +6067,9 @@
 
                 for (int i = 0; i < Cases.Count; i++)
                 {
-                    if (Cases[i].value is not null) Cases[i].value.Print(childIndent, isLast);
+                    if (Cases[i].value != null) Cases[i].value?.Print(childIndent, isLast);
                     else Console.WriteLine($"{childIndent}└── default");
-                    if (Cases[i].body is not null) foreach (var body in Cases[i].body) body.Print((childIndent) + (i == Cases.Count - 1 ? "    " : "│   "), false);
+                    if (Cases[i].body != null) foreach (var body in Cases[i].body) body.Print((childIndent) + (i == Cases.Count - 1 ? "    " : "│   "), false);
                 }
             }
         }
@@ -5736,9 +6095,8 @@
 
             public override object Evaluate(ExecutionContext context)
             {
-                //для Goto
                 context.Check();
-                return null;
+                return null!;
             }
             public override void Print(string indent = "", bool isLast = true)
             {
@@ -5941,7 +6299,7 @@
                     case UnresolvedReferenceNode ur: ns = string.Join(".", ur.Parts); break;
                     default: throw new ApplicationException("Invalid using directive");
                 }
-                if (ns.Length < 200 || context.Usings.Count > 200) context.Usings.Add(ns);
+                if (ns.Length < 200 && context.Usings.Count < 200) context.Usings.Add(ns);
                 else throw new ApplicationException("using directive is too large");
                     return null!;
             }
@@ -6148,7 +6506,11 @@
                             }
                             return ret!;
                         }
-                        catch (Exception e) { inFuncException = FormatExceptionForUser(e, frameLimit: 2, innerLimit: 1); }
+                        catch (Exception ex) 
+                        { 
+                            inFuncException = FormatExceptionForUser(ex, frameLimit: 2, innerLimit: 1); 
+                            if (ex is OperationCanceledException or OutOfMemoryException or StackOverflowException) throw; 
+                        }
                         finally { ctx.ExitFunction(); }
                     }
                     throw new ApplicationException( (inFuncException is null ? $"No native overload '{Name}' matches given arguments " +
