@@ -101,7 +101,7 @@
             "if", "goto", "for", "while", "do", "void","return", "break","continue","try","catch", "switch", "case", "finally" , "var", "default", "throw", "else", "new", "foreach", "in",
             "using", "struct", "class", "checked", "unchecked", "out", "const", "enum", "ref", "private", "public", "protected", "static", "abstract", "interface", "delegate", "as", "base",
             "internal", "unsafe", "sealed", "virtual", "override", "partial", "readonly", "params", "lock", "implicit", "explicit", "fixed", "extern", "operator", "namespace", "event", "is",
-            "and", "or", "not", "async", "await", "volatile", "yield", "record" };
+            "and", "or", "not", "async", "await", "volatile", "yield", "record", "where", "nameof" };
             public void ResetCurrent(int pos, Ast.TokenType token, string text)
             {
                 _position = pos;
@@ -139,12 +139,12 @@
                             continue;
                         }
                         break;
-                    } 
+                    }
                     CurrentTokenText = _text.Substring(start, _position - start);
                     CurrentTokenType = Ast.TokenType.Number;
                     return;
                 }
-                
+
                 //Identifier or keyword
                 if (char.IsLetter(current) || current == '_')
                 {
@@ -278,7 +278,7 @@
                     if (_text[_position] == '#') //if preprocessor command
                     {
                         _position++;
-                        while (_position < _text.Length && char.IsLetter(_text[_position])) 
+                        while (_position < _text.Length && char.IsLetter(_text[_position]))
                             _position++;
                         _position++;
                     }
@@ -318,7 +318,8 @@
         }
 
         private void Consume(Ast.TokenType type)
-        {if (_lexer.CurrentTokenType != type)
+        {
+            if (_lexer.CurrentTokenType != type)
                 throw new Exception($"Expected {type}, but got {_lexer.CurrentTokenType}");
             _lexer.NextToken();
         }
@@ -328,6 +329,7 @@
             tokenText == "var" || Enum.TryParse<Ast.ValueType>(tokenText, ignoreCase: true, out _) || _declaredEnums.Contains(tokenText);
         private bool PeekPointerMark()
             => _lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "*";
+        bool IsOp(string op) => _lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == op;
         private Ast.ValueType ReadMaybePointer(Ast.ValueType baseType)
         {
             if (PeekPointerMark()) { _lexer.NextToken(); return Ast.ValueType.IntPtr; }
@@ -366,7 +368,6 @@
             }
             return sb.ToString();
         }
-        
         private (bool isArray, int?[] dims) ReadArraySuffixes()
         {
             if (_lexer.CurrentTokenType != Ast.TokenType.BracketsOpen)
@@ -402,6 +403,211 @@
 
             return (true, list.ToArray());
         }
+        #region Generics
+        void ConsumeGenericCloserOrThrow(string context)
+        {
+            if (IsOp(">")) { _lexer.NextToken(); return; }
+            if (IsOp(">>"))
+            {
+                int end = _lexer.Position;
+                int start = end - _lexer.CurrentTokenText.Length;
+                _lexer.ResetCurrent(start + 1, Ast.TokenType.Operator, ">");
+                return;
+            }
+            if (IsOp(">>>"))
+            {
+                int end = _lexer.Position;
+                int start = end - _lexer.CurrentTokenText.Length;
+                _lexer.ResetCurrent(start + 1, Ast.TokenType.Operator, ">>");
+                return;
+            }
+            throw new ApplicationException($"Expected > while parsing generics ({context}), got '{_lexer.CurrentTokenText}'.");
+        }
+        string[] ParseTypeParameterListIfAny()
+        {
+            if (!IsOp("<")) return Array.Empty<string>();
+            _lexer.NextToken(); // '<'
+            var list = new List<string>();
+            if (IsOp(">")) { _lexer.NextToken(); return list.ToArray(); }
+
+            while (true)
+            {
+                if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+                    throw new ApplicationException($"Expected Identifier in parameter list, got '{_lexer.CurrentTokenText}'.");
+
+                list.Add(_lexer.CurrentTokenText);
+                _lexer.NextToken();
+
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                ConsumeGenericCloserOrThrow("parameter type list");
+                break;
+            }
+            return list.ToArray();
+        }
+        Dictionary<string, string[]>? ParseGenericConstraintsIfAny()
+        {
+            if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "where"))
+                return null;
+            int maxIters = Math.Max(256, _lexer.GetCodeLength() * 4);
+            int iters = 0;
+            var map = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            while (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "where")
+            {
+                _lexer.NextToken(); // skip where
+
+                if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+                    throw new ApplicationException("Expecter parameter name after 'where'.");
+
+                string tp = _lexer.CurrentTokenText;
+                _lexer.NextToken(); // skip name
+
+                if (_lexer.CurrentTokenType != Ast.TokenType.Colon)
+                    throw new ApplicationException("Expected ':' after parameter name in 'where'.");
+
+                _lexer.NextToken(); // skip :
+
+                var items = new List<string>();
+                var sb = new StringBuilder();
+                int depth = 0;
+                int pdepth = 0;
+
+                void Flush()
+                {
+                    var s = sb.ToString().Trim();
+                    if (s.Length > 0) items.Add(s);
+                    sb.Clear();
+                }
+
+                while (true)
+                {
+                    if (++iters > maxIters)
+                        throw new ApplicationException("Constraints argument parsing exceeded sane iteration limit.");
+                    if (sb.Length > (_lexer.GetCodeLength() * 2))
+                        throw new ApplicationException("Constraints argument text is too large (possible runaway parse).");
+                    if (depth == 0 && pdepth == 0)
+                    {
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); Flush(); continue; }
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "where") { Flush(); break; }
+                        if (_lexer.CurrentTokenType is Ast.TokenType.BraceOpen or Ast.TokenType.Semicolon) { Flush(); break; }
+                        if (IsOp("=>")) { Flush(); break; }
+                    }
+
+                    if (IsOp("<")) { depth++; sb.Append('<'); _lexer.NextToken(); continue; }
+                    if (IsOp(">") || IsOp(">>") || IsOp(">>>"))
+                    {
+                        if (depth > 0)
+                        {
+                            depth--;
+                            sb.Append('>');
+
+                            int end = _lexer.Position, start = end - _lexer.CurrentTokenText.Length;
+                            if (IsOp(">>>"))
+                                _lexer.ResetCurrent(start + 1, Ast.TokenType.Operator, ">>");
+                            else if (IsOp(">>"))
+                                _lexer.ResetCurrent(start + 1, Ast.TokenType.Operator, ">");
+
+                            continue;
+                        }
+                        else
+                        {
+                            Flush();
+                            break;
+                        }
+
+                    }
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen) { pdepth++; sb.Append('('); _lexer.NextToken(); continue; }
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) { pdepth = Math.Max(0, pdepth - 1); sb.Append(')'); _lexer.NextToken(); continue; }
+                    sb.Append(_lexer.CurrentTokenText);
+                    if (_lexer.CurrentTokenType is Ast.TokenType.Identifier or Ast.TokenType.Keyword) sb.Append(' ');
+                    _lexer.NextToken();
+                }
+
+                map[tp] = items;
+            }
+
+            return map.ToDictionary(kv => kv.Key, kv => kv.Value.ToArray(), StringComparer.Ordinal);
+        }
+        string[] ParseTypeArgumentListIfAny()
+        {
+            if (!IsOp("<")) return Array.Empty<string>();
+
+            _lexer.NextToken(); // skip <
+            var args = new List<string>();
+            var sb = new StringBuilder();
+            int depth = 0;
+            int maxIters = Math.Max(256, _lexer.GetCodeLength() * 4);
+            int iters = 0;
+            int lastPos = -1;
+            string lastTok = "";
+            while (true)
+            {
+                if (++iters > maxIters)
+                    throw new ApplicationException("Generic argument parsing exceeded sane iteration limit.");
+                if (sb.Length > (_lexer.GetCodeLength() * 2))
+                    throw new ApplicationException("Generic argument text is too large (possible runaway parse).");
+                if (_lexer.Position == lastPos && _lexer.CurrentTokenText == lastTok)
+                    throw new ApplicationException("Stuck while parsing generic arguments (no lexer progress).");
+                lastPos = _lexer.Position; lastTok = _lexer.CurrentTokenText;
+                if (depth == 0 && _lexer.CurrentTokenType is not Ast.TokenType.Identifier and not Ast.TokenType.Keyword
+                    and not Ast.TokenType.Comma and not Ast.TokenType.Operator)
+                {
+                    throw new ApplicationException($"Unexpected token '{_lexer.CurrentTokenText}' in type argument list.");
+                }
+                if (IsOp("<")) { depth++; sb.Append('<'); _lexer.NextToken(); continue; }
+
+                if (IsOp(">") || IsOp(">>") || IsOp(">>>"))
+                {
+                    if (depth == 0)
+                    {
+                        var part = sb.ToString().Trim();
+                        if (part.Length == 0) throw new ApplicationException("Argument cannot be empty.");
+                        args.Add(part);
+                        int end = _lexer.Position, start = end - _lexer.CurrentTokenText.Length;
+                        if (IsOp(">>>"))
+                            _lexer.ResetCurrent(start + 1, Ast.TokenType.Operator, ">>");
+                        else if (IsOp(">>"))
+                            _lexer.ResetCurrent(start + 1, Ast.TokenType.Operator, ">");
+                        else
+                            _lexer.NextToken();
+
+                        break;
+                    }
+                    else
+                    {
+                        depth--;
+                        if (depth < 0) throw new ApplicationException("Negative generic depth.");
+                        sb.Append('>');
+
+                        int end = _lexer.Position, start = end - _lexer.CurrentTokenText.Length;
+                        if (IsOp(">>>"))
+                            _lexer.ResetCurrent(start + 1, Ast.TokenType.Operator, ">>");
+                        else if (IsOp(">>"))
+                            _lexer.ResetCurrent(start + 1, Ast.TokenType.Operator, ">");
+
+                        continue;
+                    }
+                }
+
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma && depth == 0)
+                {
+                    var part = sb.ToString().Trim();
+                    if (part.Length == 0)
+                        throw new ApplicationException("Type argument cannot be empty.");
+                    args.Add(part);
+                    sb.Clear();
+                    _lexer.NextToken();
+                    continue;
+                }
+
+                sb.Append(_lexer.CurrentTokenText);
+                if (_lexer.CurrentTokenType is Ast.TokenType.Identifier or Ast.TokenType.Keyword) sb.Append(' ');
+                _lexer.NextToken();
+            }
+
+            return args.ToArray();
+        }
+        void SkipTypeArgsIfAny() => _ = ParseTypeArgumentListIfAny();
+        #endregion
         private bool IsStructModifier()
         {
             if (_lexer.CurrentTokenType != Ast.TokenType.Keyword) return false;
@@ -417,7 +623,7 @@
                 default: return false;
             }
         }
-        private bool IsClassModifier() => IsStructModifier() 
+        private bool IsClassModifier() => IsStructModifier()
             || _lexer.CurrentTokenText is "static" or "sealed" or "abstract";
 
         #endregion
@@ -429,7 +635,7 @@
             while (_lexer.CurrentTokenType != Ast.TokenType.EndOfInput)
                 statements.Add(ParseStatement());
             var hoisted = statements
-              .Where(s => s is Ast.FunctionDeclarationNode or Ast.EnumDeclarationNode or Ast.StructDeclarationNode 
+              .Where(s => s is Ast.FunctionDeclarationNode or Ast.EnumDeclarationNode or Ast.StructDeclarationNode
               or Ast.InterfaceDeclarationNode or Ast.ClassDeclarationNode)
               .Concat(statements.Where(s => s is not Ast.FunctionDeclarationNode && s is not Ast.EnumDeclarationNode && s is not Ast.StructDeclarationNode
               && s is not Ast.InterfaceDeclarationNode && s is not Ast.ClassDeclarationNode)).ToList();
@@ -458,6 +664,8 @@
             {
                 _lexer.NextToken(); return new Ast.EmptyNode();
             }
+            if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && LooksLikeTupleDeconstructionDeclaration())
+                return ParseTupleDeconstructionDeclaration();
             if (_lexer.CurrentTokenType == Ast.TokenType.Keyword)
             {
                 if (IsClassModifier())
@@ -481,16 +689,18 @@
                         _lexer.NextToken();//skip type
                         bool looksLikeFunc = _lexer.CurrentTokenType == Ast.TokenType.Identifier;
                         _lexer.NextToken();//skip name
-                        if (_lexer.CurrentTokenType != Ast.TokenType.ParenOpen) looksLikeFunc = false;
+                        looksLikeFunc = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen
+                            || (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<");
                         _lexer.ResetCurrent(savePos, saveType, saveText);
-                        if (looksLikeFunc) { _lexer.NextToken(); return ParseFunctionDeclaration(isVoid, retType, fnMods: mods ); }
-                        else if (LooksLikeStructureDeclaration()) 
+                        if (looksLikeFunc) { _lexer.NextToken(); return ParseFunctionDeclaration(isVoid, retType, fnMods: mods); }
+                        else if (LooksLikeStructureDeclaration())
                         {
                             string structTypeName = _lexer.CurrentTokenText;
                             _lexer.NextToken();//skip type
+                            var leftTypeArgs = ParseTypeArgumentListIfAny();
                             string name = _lexer.CurrentTokenText;
                             Consume(Ast.TokenType.Identifier);
-                            Consume(Ast.TokenType.Operator);
+                            Consume(Ast.TokenType.Operator); // expect =
                             Ast.AstNode expr;
                             if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new")
                             {
@@ -507,7 +717,11 @@
                             if (mods != null)
                                 name = string.IsNullOrEmpty(_currentNamespace) ? name : $"{_currentNamespace}.{name}";
                             return new Ast.VariableDeclarationNode(
-                                Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null);
+                                Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null)
+                            {
+                                CustomTypeName = structTypeName,
+                                Generic = leftTypeArgs.Length == 0 ? null : new Ast.GenericUse(leftTypeArgs)
+                            };
                         }
                         else return ParseDeclaration(mods);
                     }
@@ -526,7 +740,7 @@
                     case "try": return ParseTryCatch();
                     case "switch": return ParseSwitch();
                     case "throw": return ParseThrow();
-                    case "void": _lexer.NextToken(); return ParseFunctionDeclaration(isVoid: true );
+                    case "void": _lexer.NextToken(); return ParseFunctionDeclaration(isVoid: true);
                     case "using": return ParseUsing();
                     case "const": return ParseConstDeclaration();
                     case "enum": return ParseEnumDeclaration();
@@ -556,6 +770,28 @@
             }
             if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
             {
+                if (LooksLikeStructArrayDeclaration())
+                {
+                    _lexer.NextToken(); //skip type name
+                    var arrInfo = ReadArraySuffixes();
+                    string name = _lexer.CurrentTokenText;
+                    Consume(Ast.TokenType.Identifier);
+
+                    Ast.AstNode init = new Ast.LiteralNode(null);
+                    if (_lexer.CurrentTokenText == "=")
+                    {
+                        _lexer.NextToken();//skip =
+                        init = ParseExpression();
+                    }
+                    Consume(Ast.TokenType.Semicolon);
+
+                    return new Ast.VariableDeclarationNode(
+                        Ast.ValueType.Struct,
+                        name,
+                        init,
+                        isArray: true,
+                        arrayLength: arrInfo.dims);
+                }
                 if (LooksLikeStructureDeclaration())
                 {
                     string structTypeName = _lexer.CurrentTokenText;
@@ -575,8 +811,8 @@
                     }
                     else expr = ParseExpression();
                     Consume(Ast.TokenType.Semicolon);
-                    return new Ast.VariableDeclarationNode( 
-                        Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null );
+                    return new Ast.VariableDeclarationNode(
+                        Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null);
                 }
             }
             //expect declaration
@@ -588,7 +824,7 @@
                 Ast.TokenType saveToken = _lexer.CurrentTokenType;
                 _lexer.NextToken();//skip (
 
-                if (PeekPointerMark()) 
+                if (PeekPointerMark())
                     _lexer.NextToken();
 
                 if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
@@ -598,7 +834,8 @@
                 {
                     var ident = _lexer.CurrentTokenText;
                     _lexer.NextToken();
-                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen
+                        || (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<"))
                     {
                         return ParseFunctionDeclaration(false, saveType, ident);
                     }
@@ -611,6 +848,37 @@
             return exprStatement;
         }
         #region Struct helpers
+        private bool LooksLikeTupleDeconstructionDeclaration()
+        {
+            if (_lexer.CurrentTokenType != Ast.TokenType.ParenOpen) return false;
+            int savePos = _lexer.Position;
+            var saveType = _lexer.CurrentTokenType;
+            var saveText = _lexer.CurrentTokenText;
+
+            _lexer.NextToken(); //skip (
+            bool sawAny = false;
+            while (true)
+            {
+                if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText) && _lexer.CurrentTokenText != "var"))
+                { sawAny = false; break; }
+                _lexer.NextToken(); //skip type
+                if (PeekPointerMark()) _lexer.NextToken();
+                if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen) ReadArraySuffixes();
+                if (_lexer.CurrentTokenType == Ast.TokenType.Question) _lexer.NextToken();//skip ?
+                if (_lexer.CurrentTokenType != Ast.TokenType.Identifier) { sawAny = false; break; }
+                _lexer.NextToken(); //skip name
+                sawAny = true;
+
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                break;
+            }
+            if (!sawAny || _lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+            { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+            _lexer.NextToken(); //skip )
+            bool ok = _lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=";
+            _lexer.ResetCurrent(savePos, saveType, saveText);
+            return ok;
+        }
         private bool LooksLikeConstructor(string structName)
         {
             int savePos = _lexer.Position;
@@ -641,7 +909,7 @@
                 return false;
 
             _lexer.NextToken();//skip type
-
+            SkipTypeArgsIfAny();
             if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
             {
                 _lexer.ResetCurrent(savePos, saveType, saveText);
@@ -665,9 +933,9 @@
             _lexer.NextToken();//skip new
             if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
             {
-                if(_lexer.CurrentTokenText != saveText)
+                if (_lexer.CurrentTokenText != saveText)
                 {
-                    _lexer.ResetCurrent(savePos, saveType, saveText); 
+                    _lexer.ResetCurrent(savePos, saveType, saveText);
                     return false;
                 }
                 _lexer.NextToken();//skip struct name
@@ -678,6 +946,69 @@
             bool looksTargetTyped = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
             _lexer.ResetCurrent(savePos, saveType, saveText);
             return looksTargetTyped;
+        }
+        private bool LooksLikeStructArrayDeclaration()
+        {
+            int savePos = _lexer.Position;
+            var saveType = _lexer.CurrentTokenType;
+            var saveText = _lexer.CurrentTokenText;
+
+            if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+                return false;
+            if (saveText == "Struct")
+            {
+                _lexer.NextToken(); //skip type name
+                SkipTypeArgsIfAny();
+                bool looksOk = _lexer.CurrentTokenType == Ast.TokenType.BracketsOpen;
+                _lexer.ResetCurrent(savePos, saveType, saveText); return looksOk;
+            }
+            _lexer.NextToken(); //skip type name
+            SkipTypeArgsIfAny();
+            if (_lexer.CurrentTokenType != Ast.TokenType.BracketsOpen)
+            { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+
+            do
+            {
+                _lexer.NextToken(); //[
+
+                //fixed size
+                do
+                {
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Number)
+                    {
+                        _lexer.NextToken();
+                    }
+
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                    {
+                        _lexer.NextToken();
+                        continue;
+                    }
+                    break;
+                } while (true);
+
+                if (_lexer.CurrentTokenType != Ast.TokenType.BracketsClose)
+                { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+                _lexer.NextToken(); //]
+
+            } while (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen);
+
+
+            if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+            { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+            _lexer.NextToken();//variable name
+            if ((_lexer.CurrentTokenText != "="))
+            { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+            _lexer.NextToken();//skip =
+            if ((_lexer.CurrentTokenType != Ast.TokenType.BraceOpen))
+            { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+            _lexer.NextToken();//skip {
+            if ((_lexer.CurrentTokenText != "new"))
+            { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+            _lexer.NextToken();//skip new
+            bool ok = (_lexer.CurrentTokenText == saveText);
+            _lexer.ResetCurrent(savePos, saveType, saveText);
+            return ok;
         }
         private Ast.NewStructNode ParseTargetTypedNew(string structName)
         {
@@ -715,10 +1046,10 @@
             {
 
                 (bool isArr, int?[] dims) arrayInfo = ReadArraySuffixes();
-                if (!isVar) 
-                { 
-                    baseType = ReadMaybePointer(baseType); 
-                    baseType = ReadMaybeNullable(baseType); 
+                if (!isVar)
+                {
+                    baseType = ReadMaybePointer(baseType);
+                    baseType = ReadMaybeNullable(baseType);
                 }
                 var name = _lexer.CurrentTokenText;
                 if (mods != null)
@@ -749,7 +1080,7 @@
 
             Consume(Ast.TokenType.Semicolon);
 
-            return declarations.Count == 1  ? declarations[0] : new Ast.StatementListNode(declarations);
+            return declarations.Count == 1 ? declarations[0] : new Ast.StatementListNode(declarations);
 
         }
         private Ast.AstNode ParseConstDeclaration()
@@ -774,7 +1105,7 @@
             if (init is Ast.LiteralNode lit)
                 _constScopes.Peek()[name] = lit;
             else
-                return new Ast.VariableDeclarationNode( Enum.Parse<Ast.ValueType>(typeTok, true), 
+                return new Ast.VariableDeclarationNode(Enum.Parse<Ast.ValueType>(typeTok, true),
                     name, init, isArray: false, isConst: true, isPublic: false, innerType: null);
 
             return new Ast.EmptyNode();
@@ -848,7 +1179,7 @@
                         left = new Ast.IsPatternNode(left, pattern);
                         continue;
                     }
-                    if(_lexer.CurrentTokenText == "switch")
+                    if (_lexer.CurrentTokenText == "switch")
                     {
                         _lexer.NextToken();//skip switch
                         Consume(Ast.TokenType.BraceOpen);
@@ -912,9 +1243,9 @@
 
             if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
             {
-                int bakPos = _lexer.Position;
-                var bakType = _lexer.CurrentTokenType;
-                var bakText = _lexer.CurrentTokenText;
+                int savePos = _lexer.Position;
+                var saveType = _lexer.CurrentTokenType;
+                var saveText = _lexer.CurrentTokenText;
 
                 bool looksLikeLambda = false;
                 bool looksLikeCast = false;
@@ -925,24 +1256,52 @@
                     _lexer.NextToken();
                     looksLikeLambda = _lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=>";
                 }
-                else if (_lexer.CurrentTokenType == Ast.TokenType.Keyword &&
-                         IsTypeKeyword(_lexer.CurrentTokenText)) // (int
+                else
                 {
-                    _lexer.NextToken();//skip type
-                    if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+                    bool ok = true;
+                    do
                     {
-                        looksLikeLambda = true; // (int x
-                    }
-                    else if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose)
-                    {
-                        _lexer.NextToken(); //skip (
-                        if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=>")
-                            looksLikeLambda = true; // (int)=>
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText))
+                        {
+                            _lexer.NextToken(); //skip type
+                            if (PeekPointerMark()) _lexer.NextToken();
+                            //var arrInfo = ReadArraySuffixes();
+                            if (_lexer.CurrentTokenType != Ast.TokenType.Identifier) { ok = false; break; }
+                            _lexer.NextToken(); //skip name
+                        }
+                        else if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+                        {
+                            _lexer.NextToken();
+                        }
                         else
-                            looksLikeCast = true; // (int)expr
+                        {
+                            ok = false; break;
+                        }
+
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                        {
+                            _lexer.NextToken();
+                            continue;
+                        }
+                        break;
+                    } while (true);
+
+                    if (ok && _lexer.CurrentTokenType == Ast.TokenType.ParenClose)
+                    {
+                        _lexer.NextToken(); // skip )
+                        looksLikeLambda = _lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=>";
                     }
+                    else if (!ok)
+                    {
+                        if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose)
+                        {
+                            _lexer.NextToken();
+                            looksLikeCast = _lexer.CurrentTokenType != Ast.TokenType.Operator || _lexer.CurrentTokenText != "=>";
+                        }
+                    }
+
                 }
-                _lexer.ResetCurrent(bakPos, bakType, bakText);
+                _lexer.ResetCurrent(savePos, saveType, saveText);
 
                 if (looksLikeLambda)
                     return ParseLambda();
@@ -959,9 +1318,56 @@
                 }
 
                 _lexer.NextToken(); //skip (
-                var inner = ParseExpression();
+                var items = new List<(string? name, Ast.AstNode expr)>();
+                bool hasComma = false;
+                bool hasNamed = false;
+
+                if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                {
+                    while (true)
+                    {
+                        string? fieldName = null;
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+                        {
+                            int savePos2 = _lexer.Position;
+                            var saveType2 = _lexer.CurrentTokenType;
+                            var saveText2 = _lexer.CurrentTokenText;
+
+                            string candidate = _lexer.CurrentTokenText;
+                            _lexer.NextToken();
+
+                            if (_lexer.CurrentTokenType == Ast.TokenType.Colon)
+                            {
+                                hasNamed = true;
+                                _lexer.NextToken(); // skip :
+                                fieldName = candidate;
+                                var valueExpr = ParseExpression();
+                                items.Add((fieldName, valueExpr));
+                            }
+                            else
+                            {
+                                _lexer.ResetCurrent(savePos2, saveType2, saveText2);
+                                items.Add((null, ParseExpression()));
+                            }
+                        }
+                        else
+                        {
+                            items.Add((null, ParseExpression()));
+                        }
+
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                        {
+                            hasComma = true;
+                            _lexer.NextToken();
+                            continue;
+                        }
+                        break;
+                    }
+                }
                 Consume(Ast.TokenType.ParenClose);
-                return inner;
+                if (hasComma || items.Count > 1 || hasNamed)
+                    return new Ast.TupleLiteralNode(items.ToArray());
+                return items.Count == 0 ? new Ast.TupleLiteralNode(Array.Empty<(string?, Ast.AstNode)>()) : items[0].expr;
             }
 
             return ParsePrimary();
@@ -975,10 +1381,35 @@
                     if (_lexer.CurrentTokenText == "new")
                     {
                         _lexer.NextToken(); //skip new
-                        if(_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
                         {
                             string structName = _lexer.CurrentTokenText;
                             _lexer.NextToken();
+                            var typeArgs = ParseTypeArgumentListIfAny();
+                            if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
+                            {
+                                var arrSizes = new List<Ast.AstNode>();
+                                int arrRank = 0;
+                                while (true)
+                                {
+                                    arrRank++;
+                                    Consume(Ast.TokenType.BracketsOpen);
+                                    if (_lexer.CurrentTokenType != Ast.TokenType.BracketsClose)
+                                        arrSizes.Add(ParseExpression());
+                                    Consume(Ast.TokenType.BracketsClose);
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen) continue;
+                                    break;
+                                }
+
+                                if (_lexer.CurrentTokenType == Ast.TokenType.BraceOpen)
+                                {
+                                    var lit = (Ast.ArrayLiteralNode)ParsePrimary();
+                                    lit.ElementType = Ast.ValueType.Struct;
+                                    return lit;
+                                }
+
+                                return new Ast.NewArrayNode(arrRank > 1 ? Ast.ValueType.Array : Ast.ValueType.Struct, len: arrSizes.ToArray());
+                            }
                             Consume(Ast.TokenType.ParenOpen);
                             var args = new List<Ast.AstNode>();
                             if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
@@ -993,7 +1424,10 @@
                             }
                             Consume(Ast.TokenType.ParenClose);
 
-                            return new Ast.NewStructNode(structName, args.ToArray());
+                            return new Ast.NewStructNode(structName, args.ToArray())
+                            {
+                                Generic = typeArgs.Length == 0 ? null : new Ast.GenericUse(typeArgs)
+                            };
                         }
                         if (!IsTypeKeyword(_lexer.CurrentTokenText))
                             throw new ApplicationException("Expected type after 'new'");
@@ -1021,173 +1455,248 @@
                         }
                         return new Ast.NewArrayNode(rank > 1 ? Ast.ValueType.Array : elemType, sizes.ToArray());
                     }
-                    break;
-                case Ast.TokenType.Number:
-                    string num = _lexer.CurrentTokenText; _lexer.NextToken();
-                    if (num.Contains('.')) return new Ast.LiteralNode(double.Parse(num, CultureInfo.InvariantCulture));
-                    if (ulong.TryParse(num, out var ulongVal))
-                    {
-                        if (ulongVal <= int.MaxValue)
-                            return new Ast.LiteralNode((int)ulongVal);
-                        else if (ulongVal <= uint.MaxValue)
-                            return new Ast.LiteralNode((uint)ulongVal);
-                        else if (ulongVal <= long.MaxValue)
-                            return new Ast.LiteralNode((long)ulongVal);
-                        else
-                            return new Ast.LiteralNode(ulongVal);
-                    }
-                    if (long.TryParse(num, out var longVal))
-                    {
-                        if (longVal >= int.MinValue)
-                            return new Ast.LiteralNode((int)longVal);
-                        else if (longVal >= long.MinValue)
-                            return new Ast.LiteralNode(longVal);
-                    }
-                    return new Ast.LiteralNode(int.Parse(num));
-                case Ast.TokenType.Char:
-                    char ch = _lexer.CurrentTokenText[0];
-                    _lexer.NextToken();
-                    return new Ast.LiteralNode(ch);
-                case Ast.TokenType.String:
-                    var strValue = Unescape(_lexer.CurrentTokenText);
-                    _lexer.NextToken();
-                    return new Ast.LiteralNode(strValue);
-                case Ast.TokenType.InterpolatedString:
-                    var strValue2 = _lexer.CurrentTokenText;
-                    _lexer.NextToken();
-                    return ParseInterpolatedString(strValue2);
-                case Ast.TokenType.Identifier:
-                    var name = _lexer.CurrentTokenText;
-                    _lexer.NextToken();
-                    if (name == "true") return new Ast.LiteralNode(true);
-                    if (name == "false") return new Ast.LiteralNode(false);
-                    if (name == "null") return new Ast.LiteralNode(null);
-                    Ast.AstNode? ln = null;
-                    if (_constScopes.Any(s => s.TryGetValue(name, out ln)))
-                        return ln;
-                    var parts = new List<string> { name };
-                    int savePosition = _lexer.Position;
-                    var saveTokenType = _lexer.CurrentTokenType;
-                    var saveTokenText = _lexer.CurrentTokenText;
-                    while (_lexer.CurrentTokenType == Ast.TokenType.Dot)
+                    if (_lexer.CurrentTokenText == "nameof")
                     {
                         _lexer.NextToken();
-                        if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
-                            break;
-
-                        parts.Add(_lexer.CurrentTokenText);
-                        _lexer.NextToken();
-                    }
-
-                    //_lexer.ResetCurrent(savePosition, saveTokenType, saveTokenText);
-
-                    var node = new Ast.VariableReferenceNode(name);
-                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
-                    {
-                        _lexer.NextToken(); //skip (
-                        string fullname = string.Join(".", parts);
-                        var args = new List<Ast.AstNode>();
-                        if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                        Consume(Ast.TokenType.ParenOpen);
+                        string last = "";
+                        if (_lexer.CurrentTokenType is Ast.TokenType.Identifier or Ast.TokenType.Keyword)
                         {
-                            do
+                            last = _lexer.CurrentTokenText;
+                            _lexer.NextToken();
+                            while (_lexer.CurrentTokenType == Ast.TokenType.Dot)
                             {
-                                args.Add(ParseExpression());
-                                if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                _lexer.NextToken(); // skip .
+                                if (_lexer.CurrentTokenType is Ast.TokenType.Identifier or Ast.TokenType.Keyword)
                                 {
+                                    last = _lexer.CurrentTokenText;
                                     _lexer.NextToken();
-                                    continue;
                                 }
-                                break;
+                                else throw new ApplicationException("Identifier expected after '.' in nameof(...)");
                             }
-                            while (true);
                         }
                         Consume(Ast.TokenType.ParenClose);
-                        return new Ast.CallNode(fullname, args.ToArray());
+                        return new Ast.LiteralNode(last);
                     }
-                    
-                    while (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
+                    if (_lexer.CurrentTokenText == "default")
                     {
-                        _lexer.NextToken(); //skip [
-                        bool fromEnd = false;
-                        if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "^")
+                        _lexer.NextToken();
+                        if (_lexer.CurrentTokenType != Ast.TokenType.ParenOpen)
+                            return new Ast.LiteralNode(null);
+                        Consume(Ast.TokenType.ParenOpen);
+                        if (!IsTypeKeyword(_lexer.CurrentTokenText))
+                            throw new ApplicationException("Type expected in default(<type>)");
+                        var vt = Enum.Parse<Ast.ValueType>(_lexer.CurrentTokenText, true);
+                        _lexer.NextToken();
+                        vt = ReadMaybePointer(vt);
+                        vt = ReadMaybeNullable(vt);
+                        var arrInfo = ReadArraySuffixes();
+                        if (arrInfo.isArray) vt = Ast.ValueType.Array;
+                        Consume(Ast.TokenType.ParenClose);
+                        return new Ast.LiteralNode(Ast.ExecutionContext.DefaultValue(vt));
+                    }
+                    break;
+                case Ast.TokenType.Number:
+                    {
+                        string num = _lexer.CurrentTokenText; _lexer.NextToken();
+                        if (num.Contains('.')) return new Ast.LiteralNode(double.Parse(num, CultureInfo.InvariantCulture));
+                        if (ulong.TryParse(num, out var ulongVal))
                         {
-                            fromEnd = true;
+                            if (ulongVal <= int.MaxValue)
+                                return new Ast.LiteralNode((int)ulongVal);
+                            else if (ulongVal <= uint.MaxValue)
+                                return new Ast.LiteralNode((uint)ulongVal);
+                            else if (ulongVal <= long.MaxValue)
+                                return new Ast.LiteralNode((long)ulongVal);
+                            else
+                                return new Ast.LiteralNode(ulongVal);
+                        }
+                        if (long.TryParse(num, out var longVal))
+                        {
+                            if (longVal >= int.MinValue)
+                                return new Ast.LiteralNode((int)longVal);
+                            else if (longVal >= long.MinValue)
+                                return new Ast.LiteralNode(longVal);
+                        }
+                        return new Ast.LiteralNode(int.Parse(num));
+                    }
+                case Ast.TokenType.Char:
+                    {
+                        char ch = _lexer.CurrentTokenText[0];
+                        _lexer.NextToken();
+                        return new Ast.LiteralNode(ch);
+                    }
+                case Ast.TokenType.String:
+                    {
+                        var strValue = Unescape(_lexer.CurrentTokenText);
+                        _lexer.NextToken();
+                        return new Ast.LiteralNode(strValue);
+                    }
+                case Ast.TokenType.InterpolatedString:
+                    {
+                        var strValue = _lexer.CurrentTokenText;
+                        _lexer.NextToken();
+                        return ParseInterpolatedString(strValue);
+                    }
+                case Ast.TokenType.Identifier:
+                    {
+                        var name = _lexer.CurrentTokenText;
+                        _lexer.NextToken();
+                        if (name == "true") return new Ast.LiteralNode(true);
+                        if (name == "false") return new Ast.LiteralNode(false);
+                        if (name == "null") return new Ast.LiteralNode(null);
+                        Ast.AstNode? ln = null;
+                        if (_constScopes.Any(s => s.TryGetValue(name, out ln)))
+                            return ln!;
+                        var parts = new List<string> { name };
+                        bool lastNullConditional = false;
+                        while (_lexer.CurrentTokenType == Ast.TokenType.Dot)
+                        {
+                            lastNullConditional = _lexer.CurrentTokenText == "?.";
+                            _lexer.NextToken();
+                            if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+                                break;
+
+                            parts.Add(_lexer.CurrentTokenText);
                             _lexer.NextToken();
                         }
-                        bool hasStart = false;
-                        Ast.AstNode? startExpr = null;
-                        if (_lexer.CurrentTokenType != Ast.TokenType.Range && _lexer.CurrentTokenType != Ast.TokenType.BracketsClose)
+
+                        var node = new Ast.VariableReferenceNode(name);
+                        Ast.GenericUse? callGeneric = null;
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<")
                         {
-                            hasStart = true;
-                            startExpr = ParseExpression();
+                            int savePos = _lexer.Position;
+                            var saveType = _lexer.CurrentTokenType;
+                            var saveText = _lexer.CurrentTokenText;
+                            try
+                            {
+                                var peeked = ParseTypeArgumentListIfAny();
+                                if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
+                                {
+                                    callGeneric = new Ast.GenericUse(peeked);
+                                }
+                                else
+                                {
+                                    _lexer.ResetCurrent(savePos, saveType, saveText);
+                                }
+                            }
+                            catch
+                            {
+                                _lexer.ResetCurrent(savePos, saveType, saveText);
+                            }
                         }
-                        if (_lexer.CurrentTokenType == Ast.TokenType.Range) 
-                        {
-                            _lexer.NextToken(); //skip ..
-
-                            Ast.AstNode? endExpr = null;
-                            if (_lexer.CurrentTokenType != Ast.TokenType.BracketsClose)
-                                endExpr = ParseExpression();
-
-                            Consume(Ast.TokenType.BracketsClose);
-
-                            var args = new List<Ast.AstNode> { node };
-                            if (hasStart) args.Add(startExpr!);
-                            if (endExpr != null) args.Add(endExpr);
-
-                            return  new Ast.CallNode("InRange", args.ToArray());
-                        }
-
-
-
-
-                        Ast.AstNode indexExpr = hasStart ? startExpr! : ParseExpression();
-                        Consume(Ast.TokenType.BracketsClose); //skip ]
-                        return new Ast.ArrayIndexNode(node, indexExpr, fromEnd);
-                    }
-                    if(parts.Count > 1) //arr.Length
-                    {
-                        //return new Ast.CallNode(string.Join(".", parts), new Ast.AstNode[0]);
-                        return new Ast.UnresolvedReferenceNode(parts);
-                    }
-                    return node;
-                case Ast.TokenType.ParenOpen:
-                    Console.WriteLine("parsing");
-                    int savePos = _lexer.Position;
-                    var saveType = _lexer.CurrentTokenType;
-                    var saveText = _lexer.CurrentTokenText;
-
-                    int depth = 0;
-                    bool sawArrow = false;
-                    do
-                    {
                         if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
-                            depth++;
-                        else if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose)
-                            depth--;
-
-                        if (depth == 0 &&
-                            _lexer.CurrentTokenType == Ast.TokenType.Operator &&
-                            _lexer.CurrentTokenText == "=>")
                         {
-                            sawArrow = true;
-                            break;
+                            _lexer.NextToken(); //skip (
+                            string fullname = string.Join(".", parts);
+                            var args = new List<Ast.AstNode>();
+                            if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                            {
+                                do
+                                {
+                                    args.Add(ParseExpression());
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                    {
+                                        _lexer.NextToken();
+                                        continue;
+                                    }
+                                    break;
+                                }
+                                while (true);
+                            }
+                            Consume(Ast.TokenType.ParenClose);
+                            return new Ast.CallNode(fullname, args.ToArray())
+                            {
+                                Generic = callGeneric,
+                                IsNullConditional = lastNullConditional
+                            };
                         }
-                        _lexer.NextToken();
+
+                        while (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
+                        {
+                            bool nullIndex = _lexer.CurrentTokenText == "?[";
+                            _lexer.NextToken(); //skip [
+                            bool fromEnd = false;
+                            if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "^")
+                            {
+                                fromEnd = true;
+                                _lexer.NextToken();
+                            }
+                            bool hasStart = false;
+                            Ast.AstNode? startExpr = null;
+                            if (_lexer.CurrentTokenType != Ast.TokenType.Range && _lexer.CurrentTokenType != Ast.TokenType.BracketsClose)
+                            {
+                                hasStart = true;
+                                startExpr = ParseExpression();
+                            }
+                            if (_lexer.CurrentTokenType == Ast.TokenType.Range)
+                            {
+                                _lexer.NextToken(); //skip ..
+
+                                Ast.AstNode? endExpr = null;
+                                if (_lexer.CurrentTokenType != Ast.TokenType.BracketsClose)
+                                    endExpr = ParseExpression();
+
+                                Consume(Ast.TokenType.BracketsClose);
+
+                                var args = new List<Ast.AstNode> { node };
+                                if (hasStart) args.Add(startExpr!);
+                                if (endExpr != null) args.Add(endExpr);
+
+                                return new Ast.CallNode("InRange", args.ToArray()) { IsNullConditional = nullIndex };
+                            }
+
+
+
+
+                            Ast.AstNode indexExpr = hasStart ? startExpr! : ParseExpression();
+                            Consume(Ast.TokenType.BracketsClose); //skip ]
+                            return new Ast.ArrayIndexNode(node, indexExpr, fromEnd, nullIndex);
+                        }
+                        if (parts.Count > 1) //arr.Length
+                        {
+                            return new Ast.UnresolvedReferenceNode(parts, lastNullConditional);
+                        }
+                        return node;
                     }
-                    while (_lexer.CurrentTokenType != Ast.TokenType.EndOfInput);
+                case Ast.TokenType.ParenOpen:
+                    {
+                        int savePos = _lexer.Position;
+                        var saveType = _lexer.CurrentTokenType;
+                        var saveText = _lexer.CurrentTokenText;
 
-                    _lexer.ResetCurrent(savePos, saveType, saveText);
+                        int depth = 0;
+                        bool sawArrow = false;
+                        do
+                        {
+                            if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
+                                depth++;
+                            else if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose)
+                                depth--;
 
-                    if (sawArrow)
-                        return ParseLambda();
+                            if (depth == 0 &&
+                                _lexer.CurrentTokenType == Ast.TokenType.Operator &&
+                                _lexer.CurrentTokenText == "=>")
+                            {
+                                sawArrow = true;
+                                break;
+                            }
+                            _lexer.NextToken();
+                        }
+                        while (_lexer.CurrentTokenType != Ast.TokenType.EndOfInput);
 
-                    _lexer.NextToken();
-                    var expr = ParseExpression();
-                    Consume(Ast.TokenType.ParenClose);
-                    return expr;
+                        _lexer.ResetCurrent(savePos, saveType, saveText);
+
+                        if (sawArrow)
+                            return ParseLambda();
+
+                        _lexer.NextToken();
+                        var expr = ParseExpression();
+                        Consume(Ast.TokenType.ParenClose);
+                        return expr;
+                    }
                 case Ast.TokenType.BraceOpen:
-                {
+                    {
                         _lexer.NextToken();
                         var elems = new List<Ast.AstNode>();
                         if (_lexer.CurrentTokenType != Ast.TokenType.BraceClose)
@@ -1203,7 +1712,7 @@
                         Consume(Ast.TokenType.BraceClose);
 
                         return new Ast.ArrayLiteralNode(Ast.ValueType.Object, elems.ToArray());
-                }
+                    }
 
             }
 
@@ -1266,14 +1775,24 @@
                 Consume(Ast.TokenType.Identifier);
             }
             name = string.IsNullOrEmpty(_currentNamespace) ? name : $"{_currentNamespace}.{name}";
+            var fnTypeParams = ParseTypeParameterListIfAny();
             Consume(Ast.TokenType.ParenOpen);
             var paramNames = new List<string>();
             var paramTypes = new List<Ast.ValueType>();
             var defaultVals = new List<Ast.AstNode?>();
+            int paramsIndex = -1;
+           
+
             if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
             {
                 do
                 {
+                    bool isParams = false;
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "params")
+                    {
+                        isParams = true;
+                        _lexer.NextToken(); //skip params
+                    }
                     var pType = Ast.ValueType.Object;
                     if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText))
                     {
@@ -1289,6 +1808,14 @@
 
                     var pname = _lexer.CurrentTokenText;
                     Consume(Ast.TokenType.Identifier);
+                    if (isParams)
+                    {
+                        if (paramsIndex != -1)
+                            throw new ApplicationException("Only one params parameter is allowed.");
+                        if (pType != Ast.ValueType.Array)
+                            throw new ApplicationException("The 'params' parameter must be an array type.");
+                        paramsIndex = paramNames.Count;
+                    }
                     paramTypes.Add(pType);
                     paramNames.Add(pname);
                     Ast.AstNode? def = null;
@@ -1307,7 +1834,7 @@
                 while (true);
             }
             Consume(Ast.TokenType.ParenClose);
-
+            Dictionary<string, string[]>? fnWhere = ParseGenericConstraintsIfAny();
             Ast.AstNode body;
             if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=>")
             {
@@ -1320,7 +1847,11 @@
             {
                 body = _lexer.CurrentTokenType == Ast.TokenType.BraceOpen ? ParseBlock() : ParseStatement();
             }
-            return new Ast.FunctionDeclarationNode(retType!, name, paramNames.ToArray(), paramTypes.ToArray(), defaultVals.ToArray(), body, fnMods, attrs);
+            return new Ast.FunctionDeclarationNode(retType!, name, paramNames.ToArray(), paramTypes.ToArray(), defaultVals.ToArray(), body, fnMods, attrs)
+            {
+                Generics = (fnTypeParams.Length == 0 && fnWhere is null) ? null : new Ast.GenericInfo(fnTypeParams, fnWhere),
+                ParamsIndex = paramsIndex
+            };
         }
         private Ast.AstNode ParseReturn()
         {
@@ -1421,7 +1952,7 @@
                     if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
                     break;
                 }
-                
+
             }
             Consume(Ast.TokenType.ParenClose);
 
@@ -1466,11 +1997,17 @@
             var paramNames = new List<string>();
             var paramTypes = new List<Ast.ValueType>();
             var defaultVals = new List<Ast.AstNode?>();
-
+            int paramsIndex = -1;
             if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
             {
                 do
                 {
+                    bool isParams = false;
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "params")
+                    {
+                        isParams = true;
+                        _lexer.NextToken(); //skip params
+                    }
                     var pType = Ast.ValueType.Object;
                     if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText))
                     {
@@ -1484,6 +2021,14 @@
 
                     var pname = _lexer.CurrentTokenText;
                     Consume(Ast.TokenType.Identifier);
+                    if (isParams)
+                    {
+                        if (paramsIndex != -1)
+                            throw new ApplicationException("Only one params parameter is allowed.");
+                        if (pType != Ast.ValueType.Array)
+                            throw new ApplicationException("The 'params' parameter must be an array type.");
+                        paramsIndex = paramNames.Count;
+                    }
                     paramNames.Add(pname);
                     paramTypes.Add(pType);
 
@@ -1540,7 +2085,7 @@
                 body = _lexer.CurrentTokenType == Ast.TokenType.BraceOpen ? ParseBlock() : ParseStatement();
             }
 
-            return new Ast.ConstructorDeclarationNode(structName, paramNames.ToArray(), paramTypes.ToArray(), defaultVals.ToArray(), body, mods, init);
+            return new Ast.ConstructorDeclarationNode(structName, paramNames.ToArray(), paramTypes.ToArray(), defaultVals.ToArray(), body, mods, init, paramsIndex);
         }
 
         private Ast.AstNode ParseClassDeclaration(IList<string>? mods = null) => ParseStructDeclaration(mods);
@@ -1549,7 +2094,8 @@
             _lexer.NextToken(); // skip interface
             string name = _lexer.CurrentTokenText;
             Consume(Ast.TokenType.Identifier);
-
+            var typeParams = ParseTypeParameterListIfAny();
+            Dictionary<string, string[]>? whereMap = ParseGenericConstraintsIfAny();
             if (_lexer.CurrentTokenText == ":") //inheritance
             {
                 _lexer.NextToken();
@@ -1566,7 +2112,10 @@
             }
             Consume(Ast.TokenType.BraceClose);
 
-            return new Ast.InterfaceDeclarationNode(name, mods ?? Array.Empty<string>(), members);
+            return new Ast.InterfaceDeclarationNode(name, mods ?? Array.Empty<string>(), members)
+            {
+                Generics = (typeParams.Length == 0 && whereMap is null) ? null : new Ast.GenericInfo(typeParams, whereMap)
+            };
         }
 
         private Ast.AstNode ParseStructDeclaration(IList<string>? mods = null)
@@ -1574,6 +2123,8 @@
             _lexer.NextToken(); //skip struct
             string name = _lexer.CurrentTokenText;
             Consume(Ast.TokenType.Identifier);
+            var typeParams = ParseTypeParameterListIfAny();
+            Dictionary<string, string[]>? whereMap = ParseGenericConstraintsIfAny();
             if (_lexer.CurrentTokenText == ":")
             {
                 _lexer.NextToken(); //skip :
@@ -1590,7 +2141,10 @@
                     members.Add(ParseStatement());
             }
             Consume(Ast.TokenType.BraceClose);
-            return new Ast.StructDeclarationNode(name, mods ?? Array.Empty<string>(), members);
+            return new Ast.StructDeclarationNode(name, mods ?? Array.Empty<string>(), members)
+            {
+                Generics = (typeParams.Length == 0 && whereMap is null) ? null : new Ast.GenericInfo(typeParams, whereMap)
+            };
         }
         private Ast.AstNode ParseEnumDeclaration(IList<string>? mods = null)
         {
@@ -1600,7 +2154,7 @@
             string name = string.IsNullOrEmpty(_currentNamespace) ? simpleName : $"{_currentNamespace}.{simpleName}";
             Consume(Ast.TokenType.BraceOpen);
             var members = new List<Ast.EnumDeclarationNode.Member>();
-            
+
 
 
             while (_lexer.CurrentTokenType != Ast.TokenType.BraceClose)
@@ -1623,6 +2177,54 @@
             _declaredEnums.Add(name);
             return new Ast.EnumDeclarationNode(name, members.ToArray(), mods?.ToArray());
 
+        }
+        private Ast.AstNode ParseTupleDeconstructionDeclaration()
+        {
+            Consume(Ast.TokenType.ParenOpen);
+
+            var decls = new List<Ast.AstNode>();
+            var names = new List<string>();
+            while (true)
+            {
+                if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText)))
+                    throw new ApplicationException("Type expected in tuple deconstruction");
+
+                string typeTok = _lexer.CurrentTokenText;
+                if (typeTok == "var")
+                    throw new ApplicationException("Explicit types are required in tuple deconstruction");
+
+                _lexer.NextToken(); //skip type
+
+                var vt = Enum.Parse<Ast.ValueType>(typeTok, true);
+                vt = ReadMaybePointer(vt);
+                vt = ReadMaybeNullable(vt);
+                var arr = ReadArraySuffixes();
+                if (arr.isArray) vt = Ast.ValueType.Array;
+
+                string name = _lexer.CurrentTokenText;
+                Consume(Ast.TokenType.Identifier);
+
+                Ast.AstNode init = new Ast.LiteralNode(null);
+                Ast.AstNode decl = arr.isArray
+                    ? new Ast.VariableDeclarationNode(vt, name, init, isArray: true, arrayLength: arr.dims, isPublic: false, innerType: null)
+                    : new Ast.VariableDeclarationNode(vt, name, init, isPublic: false, innerType: null);
+
+                decls.Add(decl);
+                names.Add(name);
+
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                break;
+            }
+            Consume(Ast.TokenType.ParenClose);
+            Consume(Ast.TokenType.Operator); //expect =
+            var rhs = ParseExpression();
+            Consume(Ast.TokenType.Semicolon);
+            var leftItems = names.Select(n => ((string?)null, (Ast.AstNode)new Ast.VariableReferenceNode(n))).ToArray();
+
+            var assign = new Ast.BinOpNode(new Ast.TupleLiteralNode(leftItems), Ast.OperatorToken.Equals, rhs);
+
+            decls.Add(assign);
+            return decls.Count == 1 ? decls[0] : new Ast.StatementListNode(decls);
         }
         #endregion
         #region Flow Control parser
@@ -1652,7 +2254,7 @@
             _lexer.NextToken(); //skip for
             Consume(Ast.TokenType.ParenOpen);
 
-            Ast.AstNode init = null;
+            Ast.AstNode? init = null;
 
             if (IsTypeKeyword(_lexer.CurrentTokenText) && !int.TryParse(_lexer.CurrentTokenText, out _))
             {
@@ -1668,14 +2270,14 @@
                 Consume(Ast.TokenType.Semicolon);
             }
 
-            Ast.AstNode condition = null;
+            Ast.AstNode? condition = null;
             if (_lexer.CurrentTokenType != Ast.TokenType.Semicolon)
             {
                 condition = ParseExpression();
             }
             Consume(Ast.TokenType.Semicolon);
 
-            Ast.AstNode step = null;
+            Ast.AstNode? step = null;
             if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
             {
                 step = ParseExpression();
@@ -1683,7 +2285,7 @@
             Consume(Ast.TokenType.ParenClose);
 
             var body = _lexer.CurrentTokenType == Ast.TokenType.BraceOpen ? ParseBlock() : ParseStatement();
-            return new Ast.ForNode(init, condition, step, body);
+            return new Ast.ForNode(init!, condition!, step!, body);
         }
         private Ast.AstNode ParseForeach()
         {
@@ -1934,9 +2536,9 @@
             {
                 var vt = Enum.Parse<Ast.ValueType>(_lexer.CurrentTokenText, true);
                 _lexer.NextToken();
-                if (_lexer.CurrentTokenType == Ast.TokenType.Identifier) 
+                if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
                 {
-                    _lexer.NextToken(); 
+                    _lexer.NextToken();
                 }
                 return new Ast.TypePatternNode(vt);
             }
@@ -1961,6 +2563,9 @@
             private const int HeaderSize = 4;
             public const int MaxCallDepth = 512;
             private const int ObjectTableCapacity = 64;
+            private const byte UsedMask = 0x80; // 1000_0000
+            private const byte ArrayMask = 0x40; // 0100_0000
+            private const byte TypeMask = 0x3F; // 0011_1111
             private readonly Stack<Dictionary<string, Variable>> _scopes = new();
             private readonly Stack<int> _memoryOffsets = new();
             private readonly ObjectTable _handles = new(capacity: ObjectTableCapacity);
@@ -1977,10 +2582,9 @@
             public Dictionary<string, int> Labels { get; set; } = new();
             public CancellationToken CancellationToken { get; }
             public byte[] RawMemory => _memory;
-            public int UsedMemory => _allocPointer;
             public int MemoryUsed => _heapend;
             private string _currentNameSpace = "";
-            public string CurrentNameSpace { get { return _currentNameSpace; } set { if(value.Length < 200) _currentNameSpace = value; } }
+            public string CurrentNameSpace { get { return _currentNameSpace; } set { if (value.Length < 200) _currentNameSpace = value; } }
             public struct Function
             {
                 public ValueType ReturnType;
@@ -1990,6 +2594,8 @@
                 public AstNode Body;
                 public AttributeNode[] Attributes;
                 public bool IsPublic;
+                public Ast.GenericInfo? Generics;
+                public int ParamsIndex;
             }
             public ExecutionContext(CancellationToken token, int size = 1024 * 4, int stackSize = 1024 * 1)
             {
@@ -2037,7 +2643,7 @@
             public string PrintMemory(int bytesPerRow = 16, int dataPreview = 64, bool printStack = false)
             {
                 var sb = new System.Text.StringBuilder();
-                Console.WriteLine($"Memory: {_memory.Length / (1024*1024)}Mb {_memory.Length/1024}Kb {_memory.Length%1024}B");
+                //Console.WriteLine($"Memory: {_memory.Length / (1024*1024)}Mb {_memory.Length/1024}Kb {_memory.Length%1024}B");
                 sb.AppendLine("=== STACK ===");
                 if (printStack)
                 {
@@ -2053,7 +2659,8 @@
                     }
                     if (StackSize % bytesPerRow != 0)
                         sb.AppendLine();
-                } else sb.AppendLine("...emmited...");
+                }
+                else sb.AppendLine("...emmited...");
                 sb.AppendLine("=== HEAP ===");
                 int pos = 0;
                 try
@@ -2061,13 +2668,14 @@
                     while (pos < _heapend)
                     {
                         int headerPos = pos + StackSize;
-                        int len = GetHeapObjectLength(headerPos+HeaderSize)+HeaderSize;
+                        int len = GetHeapObjectLength(headerPos + HeaderSize) + HeaderSize;
                         bool used = IsUsed(headerPos + HeaderSize);
-                        ValueType vt = GetHeapObjectType(headerPos+HeaderSize);
+                        bool isArray = IsArray(headerPos + HeaderSize);
+                        ValueType vt = GetHeapObjectType(headerPos + HeaderSize);
                         int payload = len - HeaderSize;
 
                         sb.Append('[')
-                          .Append($"@{headerPos}({headerPos + HeaderSize}) len={payload}({payload + HeaderSize}) used={(used)} type={vt} data=");
+                          .Append($"@{headerPos}({headerPos + HeaderSize}) len={payload}({payload + HeaderSize}) used={(used)} type={vt}{(isArray ? "[]" : "")} data=");
 
                         int preview = System.Math.Min(payload, dataPreview);
                         for (int i = 0; i < preview; i++)
@@ -2078,7 +2686,8 @@
 
                         pos += len;
                     }
-                }catch(Exception e) { Console.WriteLine(e); }
+                }
+                catch (Exception e) { Console.WriteLine(e); }
                 return sb.ToString();
             }
             public void Dispose()
@@ -2092,6 +2701,7 @@
                 { Ast.ValueType.Int, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.IntPtr, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Array, (heap, offset) => BitConverter.ToInt32(heap, offset) },
+                { Ast.ValueType.Tuple, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.String, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Object, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Enum, (heap, offset) => BitConverter.ToInt32(heap, offset) },
@@ -2119,6 +2729,7 @@
                 { Ast.ValueType.IntPtr, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.String, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Array, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
+                { Ast.ValueType.Tuple, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Object, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Enum, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Struct, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
@@ -2173,7 +2784,7 @@
                             //Free(basePtr);
                         }
                     }
-                    
+
                     if (kvp.Value.Type != ValueType.Object) continue;
                     int ptr = BitConverter.ToInt32(_memory, kvp.Value.Address);
                     if (ptr >= StackSize)
@@ -2188,7 +2799,7 @@
                 CollectGarbage();
             }
 
-            
+
 
             public void EnterFunction()
             {
@@ -2215,6 +2826,7 @@
                     case ValueType.Bool: return sizeof(bool);
                     case ValueType.String: return sizeof(int);
                     case ValueType.Array: return sizeof(int);
+                    case ValueType.Tuple: return sizeof(int);
                     case ValueType.Object: return sizeof(int);
                     case ValueType.IntPtr: return sizeof(int);
                     case ValueType.Enum: return sizeof(int);
@@ -2239,7 +2851,7 @@
             public object ReadVariable(string name)
             {
                 var variable = Get(name);
-                if (variable.Address < 0) return null;
+                if (variable.Address < 0) return null!;
                 return typeReaders[variable.Type](_memory, variable.Address);
             }
             public void WriteVariable(string name, object value)
@@ -2280,23 +2892,12 @@
                 if (val is ValueTuple<int, ValueType> arr)
                     return AddPin(arr.Item1);
 
-                return -1; 
+                return -1;
             }
 
             private int AddPin(int addr)
             {
                 _pinned.Add(addr);
-
-                var elemType = GetHeapObjectType(addr);
-                if (IsReferenceType(elemType))
-                {
-                    int len = GetArrayLength(addr);
-                    for (int i = 0; i < len; i++)
-                    {
-                        int child = BitConverter.ToInt32(_memory, addr + i * sizeof(int));
-                        if (child >= StackSize) _pinned.Add(child);
-                    }
-                }
                 return addr;
             }
 
@@ -2304,34 +2905,17 @@
             private void CollectGarbage()
             {
                 //Mark
-                HashSet<int> reachable = new(_pinned);
+                HashSet<int> reachable = new();
+                foreach (var p in _pinned) Mark(p, reachable);
                 foreach (var scope in _scopes)
                     foreach (var kv in scope)
                     {
                         Variable v = kv.Value;
-                        if (v.Type == ValueType.Array)
+                        if (Ast.IsReferenceType(v.Type) || v.Type == Ast.ValueType.IntPtr || v.Type == Ast.ValueType.Array)
                         {
-                            int bp = BitConverter.ToInt32(_memory, v.Address);
-                            var et = GetHeapObjectType(bp);
-                            if (IsReferenceType(et))
-                            {
-                                int len = GetArrayLength(bp);
-                                for (int i = 0; i < len; i++)
-                                {
-                                    int p = BitConverter.ToInt32(_memory, bp + i * sizeof(int));
-                                    if (p >= StackSize) reachable.Add(p);
-                                }
-                            }
-                            if (bp >= StackSize && bp < StackSize + _heapend)
-                                reachable.Add(bp);
-                        }
-                        //Reference exist
-                        else if (Ast.IsReferenceType(v.Type) || v.Type == Ast.ValueType.IntPtr)
-                        {
-                            int ptr = BitConverter.ToInt32(_memory, v.Address);
-
-                            if (ptr >= StackSize && ptr < StackSize + _heapend)
-                                reachable.Add(ptr);
+                            int root = BitConverter.ToInt32(_memory, v.Address);
+                            if (root >= StackSize && root < StackSize + _heapend)
+                                Mark(root, reachable);
                         }
                     }
                 //Sweep
@@ -2339,32 +2923,147 @@
                 while (pos < _heapend)
                 {
                     int headerPos = pos + StackSize;
-                    int len = GetHeapObjectLength(headerPos+HeaderSize)+HeaderSize;
+                    int len = GetHeapObjectLength(headerPos + HeaderSize) + HeaderSize;
                     bool used = IsUsed(headerPos + HeaderSize);
 
                     int dataAddr = pos + HeaderSize + StackSize;
 
                     if (used && !reachable.Contains(dataAddr))
-                        Free(headerPos+HeaderSize);//free
+                        Free(headerPos + HeaderSize);//free
 
                     pos += len;//next block
                 }
             }
+            private void Mark(int ptr, HashSet<int> reachable)
+            {
+                if (ptr < StackSize || ptr >= StackSize + _heapend) return;
+                if (!reachable.Add(ptr)) return;
+
+                var vt = GetHeapObjectType(ptr);
+                if (vt == ValueType.Byte) return;
+
+                int bytes = GetHeapObjectLength(ptr);
+                int blockEnd = ptr + bytes;
+                int heapEnd = StackSize + _heapend;
+                if (bytes < 0 || blockEnd < ptr || blockEnd > heapEnd) return;
+                bool isArr = IsArray(ptr);
+                if (vt == ValueType.String && !isArr) return;
+
+                if (vt == ValueType.Nullable)
+                {
+                    if (bytes >= 1)
+                    {
+                        var baseT = (ValueType)_memory[ptr];
+                        if (IsReferenceType(baseT) && bytes >= 1 + sizeof(int))
+                        {
+                            int child = BitConverter.ToInt32(_memory, ptr + 1);
+                            if (child >= StackSize && child < heapEnd) Mark(child, reachable);
+                        }
+                    }
+                    return;
+                }
+                if (isArr)
+                {
+                    if (!IsReferenceType(vt)) return;
+                    int len = bytes / sizeof(int);
+                    if (len < 0 || len > ((heapEnd - ptr) / sizeof(int))) return;
+                    int last = ptr + len * sizeof(int);
+                    if (last > heapEnd) len = Math.Max(0, (heapEnd - ptr) / sizeof(int));
+                    for (int i = 0; i < len; i++)
+                    {
+                        int at = ptr + i * sizeof(int);
+                        if (at + sizeof(int) > heapEnd) break;
+                        int child = BitConverter.ToInt32(_memory, at);
+                        if (child >= StackSize && child < heapEnd) Mark(child, reachable);
+                    }
+                    return;
+                }
+                if (bytes >= sizeof(int))
+                {
+                    int sigPtr = BitConverter.ToInt32(_memory, ptr);
+
+                    if (vt == ValueType.Tuple)
+                    {
+                        int pos = ptr;
+                        int end = ptr + bytes;
+                        while (pos < end)
+                        {
+                            var et = (ValueType)_memory[pos++];
+
+                            if (IsReferenceType(et))
+                            {
+                                if (pos + sizeof(int) > end) break;
+                                int child = BitConverter.ToInt32(_memory, pos);
+                                if (child >= StackSize && child < StackSize + _heapend) Mark(child, reachable);
+                                pos += sizeof(int);
+                            }
+                            else
+                            {
+                                pos += GetTypeSize(et);
+                            }
+
+                            if (pos + sizeof(int) > end) break;
+                            int namePtr = BitConverter.ToInt32(_memory, pos);
+                            if (namePtr >= StackSize && namePtr < StackSize + _heapend) Mark(namePtr, reachable);
+                            pos += sizeof(int);
+                        }
+                        return;
+                    }
+                    if (vt == ValueType.Struct || (sigPtr >= StackSize && sigPtr < heapEnd && GetHeapObjectType(sigPtr) == ValueType.Byte))
+                    {
+                        if (!(sigPtr >= StackSize && sigPtr < heapEnd)) return;
+                        reachable.Add(sigPtr);
+                        int sigLen = GetHeapObjectLength(sigPtr);
+                        if (sigLen < 0 || sigPtr + sigLen > heapEnd) return;
+                        int s = 0;
+                        int val = ptr + sizeof(int);
+                        while (s < sigLen)
+                        {
+                            if (s + 1 > sigLen) break;
+                            ValueType declared = (ValueType)_memory[sigPtr + s++];
+                            if (s >= sigLen) break;
+                            int nameLen = _memory[sigPtr + s++];
+                            if (nameLen < 0 || s + nameLen > sigLen) break;
+                            s += nameLen;
+                            if (s >= sigLen) break;
+                            bool hasInit = _memory[sigPtr + s++] != 0;
+                            if (hasInit)
+                            {
+                                s += GetTypeSize(declared);
+                                if (s > sigLen) break;
+                            }
+                            if (val >= heapEnd) break;
+                            ValueType instFieldType = (ValueType)_memory[val++];
+                            int payloadSize = IsReferenceType(instFieldType) ? sizeof(int) : GetTypeSize(instFieldType);
+
+                            if (IsReferenceType(instFieldType))
+                            {
+                                if (val + sizeof(int) > heapEnd) break;
+                                int child = BitConverter.ToInt32(_memory, val);
+                                if (child >= StackSize) Mark(child, reachable);
+                            }
+
+                            val += payloadSize;
+                            if (val > blockEnd) break;
+                        }
+                        return;
+                    }
+                }
+
+            }
             public int GetArrayLength(int dataPtr)
             {
+                ValidateAddress(dataPtr);
                 int bytes = GetHeapObjectLength(dataPtr);
                 var vt = GetHeapObjectType(dataPtr);
+                int es = GetTypeSize(vt);
+                if (es <= 0) throw new ApplicationException($"Invalid element size for {vt}");
                 return bytes / GetTypeSize(vt);
             }
-            private void WriteHeader(int pos, int len, ValueType vt, bool used)
+            private void WriteHeader(int pos, int len, ValueType vt, bool used, bool isArray = false)
             {
                 checked
                 {
-                    /*
-                    BitConverter.GetBytes(len).CopyTo(_memory, pos);
-                    _memory[pos + 4] = used ? (byte)1 : (byte)0;
-                    _memory[pos + 5] = (byte)vt;
-                    */
                     if (len > 0xFFFFFF)
                         throw new ArgumentOutOfRangeException(nameof(len), "UInt24 range 0‑0xFFFFFF.");
                 }
@@ -2376,15 +3075,15 @@
                     if ((byte)vt > 0x7F)   // 0x7F = 127
                         throw new ArgumentOutOfRangeException(nameof(vt), "Must fit into 7 bits (0‑127)");
                 }
-                _memory[pos + 3] = (byte)((byte)vt | (used ? 0x80 : 0x00));
+                _memory[pos + 3] = (byte)((byte)vt | (isArray ? ArrayMask : 0) | (used ? UsedMask : 0));
 
             }
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public ValueType GetHeapObjectType(int addr) => (ValueType)(_memory[addr - HeaderSize + 3] & 0x7F);
+            public ValueType GetHeapObjectType(int addr) => (ValueType)(_memory[addr - HeaderSize + 3] & TypeMask);
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public int GetHeapObjectLength(int addr) 
+            public int GetHeapObjectLength(int addr)
                 => (_memory[addr - HeaderSize] | (_memory[addr - HeaderSize + 1] << 8) | (_memory[addr - HeaderSize + 2] << 16)) - HeaderSize;
-            
+
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public Span<byte> GetSpan(int addr)
@@ -2395,7 +3094,9 @@
                 return _memory.AsSpan(addr, len);
             }
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            public bool IsUsed(int addr) => (_memory[addr - HeaderSize + 3] & 0x80) != 0;
+            public bool IsUsed(int addr) => (_memory[addr - HeaderSize + 3] & UsedMask) != 0;
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public bool IsArray(int addr) => (_memory[addr - HeaderSize + 3] & ArrayMask) != 0;
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Free(int addr)
             {
@@ -2405,7 +3106,7 @@
                     throw new ArgumentOutOfRangeException(nameof(addr));
                 if (!IsUsed(addr))
                     throw new InvalidOperationException($"double-free or invalid pointer {addr}");
-                _memory[blockStart + 3] &= 0x7F;//free flag
+                _memory[blockStart + 3] = (byte)(_memory[blockStart + 3] & ~UsedMask);
             }
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void WriteBytes(int addr, ReadOnlySpan<byte> src)
@@ -2415,21 +3116,20 @@
 
                 src.CopyTo(_memory.AsSpan(addr, src.Length));
             }
-            public int Malloc(int size, ValueType valueType)
+            public int Malloc(int size, ValueType valueType, bool isArray = false)
             {
                 if (size < 0) throw new ArgumentException(nameof(size), "Allocation length must be positive");
                 int need = size + HeaderSize;
-                int addr = FindFreeBlock(need, valueType);
+                int addr = FindFreeBlock(need, valueType, isArray: isArray);
                 if (addr >= 0) return addr;
-                //CollectGarbage();
                 DefragmentFree();
-                addr = FindFreeBlock(need, valueType);
+                addr = FindFreeBlock(need, valueType, isArray: isArray);
                 if (addr >= 0) return addr;
                 checked
                 {
                     if (_heapend + need > _memory.Length - StackSize)
                         throw new OutOfMemoryException();
-                    WriteHeader(_heapend + StackSize, need, valueType, used: true);
+                    WriteHeader(_heapend + StackSize, need, valueType, used: true, isArray: isArray);
                     addr = _heapend + HeaderSize;
                     _heapend += need;
                     return addr + StackSize;
@@ -2444,7 +3144,7 @@
 
                 while (pos < _heapend)
                 {
-                    int len = GetHeapObjectLength(pos + StackSize+HeaderSize)+HeaderSize;
+                    int len = GetHeapObjectLength(pos + StackSize + HeaderSize) + HeaderSize;
                     bool used = IsUsed(pos + StackSize + HeaderSize);
                     if (!used)
                     {
@@ -2455,8 +3155,8 @@
                         while (next < _heapend)
                         {
                             int nHdrIdx = next + StackSize;
-                            int nLen = GetHeapObjectLength(nHdrIdx+HeaderSize)+HeaderSize;
-                            bool nUsed = IsUsed(nHdrIdx+HeaderSize);
+                            int nLen = GetHeapObjectLength(nHdrIdx + HeaderSize) + HeaderSize;
+                            bool nUsed = IsUsed(nHdrIdx + HeaderSize);
                             if (nUsed) break;
 
                             runLen += nLen;
@@ -2479,14 +3179,15 @@
 
                 _heapend = lastUsedEnd;
             }
-            private int FindFreeBlock(int need, ValueType? requested = null)
+            private int FindFreeBlock(int need, ValueType? requested = null, bool isArray = false)
             {
+
                 if (_heapend + need > _memory.Length - StackSize)
                     throw new OutOfMemoryException();
-                int pos = 0; 
+                int pos = 0;
                 while (pos < _heapend)
                 {
-                    int len = GetHeapObjectLength(pos + StackSize+HeaderSize)+HeaderSize;
+                    int len = GetHeapObjectLength(pos + StackSize + HeaderSize) + HeaderSize;
 
                     if (!IsUsed(pos + HeaderSize + StackSize) && len >= need)
                     {
@@ -2494,14 +3195,14 @@
                         ValueType vt = requested is null ? GetHeapObjectType(pos + HeaderSize + StackSize) : (ValueType)requested;
                         if (spare == 0)
                         {
-                            WriteHeader(pos + StackSize, len, vt, true);
+                            WriteHeader(pos + StackSize, len, vt, used: true, isArray: isArray);
                             return pos + HeaderSize + StackSize;
                         }
 
                         if (spare >= HeaderSize)
                         {
-                            WriteHeader(pos + StackSize, need, vt, true);
-                            WriteHeader(pos + need + StackSize, len - need, ValueType.IntPtr, false);
+                            WriteHeader(pos + StackSize, need, vt, used: true, isArray: isArray);
+                            WriteHeader(pos + need + StackSize, len - need, ValueType.IntPtr, used: false, isArray: false);
                             return pos + HeaderSize + StackSize;
                         }
 
@@ -2526,7 +3227,6 @@
                     if (bytes.Length <= capacity)
                     {
                         WriteBytes(oldPtr, bytes);
-                        //BitConverter.GetBytes(bytes.Length + HeaderSize).CopyTo(_memory, oldPtr - HeaderSize);
                         if (bytes.Length < capacity)
                             _memory.AsSpan(oldPtr + bytes.Length, capacity - bytes.Length).Clear();
                         return;
@@ -2534,7 +3234,7 @@
                     //not enough space, reallocate
                     Free(oldPtr);
                 }
-                else if(oldPtr != -1) throw new ArgumentOutOfRangeException($"Reallocating string with pointer in Stack {oldPtr}");
+                else if (oldPtr != -1) throw new ArgumentOutOfRangeException($"Reallocating string with pointer in Stack {oldPtr}");
                 int newPtr = Malloc(bytes.Length, ValueType.String);
                 WriteBytes(newPtr, bytes);
                 WriteVariable(name, newPtr);
@@ -2551,6 +3251,7 @@
                 if (et == ValueType.Array && value is int p) return p;
                 if (et == ValueType.Object) return AddObject(value!);
                 if (et == ValueType.IntPtr && value is IntPtr ip) return ip.ToInt32();
+                if (et == ValueType.Struct && value is int sp) return sp;
                 if (et == ValueType.Nullable)
                 {
                     if (value is null) return -1;
@@ -2568,7 +3269,7 @@
                 {
                     var (len, elemType) = info;
                     int bytes = IsReferenceType(elemType) ? sizeof(int) * len : GetTypeSize(elemType) * len;
-                    int basePtr = Malloc(bytes, elemType);
+                    int basePtr = Malloc(bytes, elemType, isArray: true);
                     int payload = GetHeapObjectLength(basePtr);
                     RawMemory.AsSpan(basePtr, payload).Fill(IsReferenceType(elemType) ? (byte)0xFF : (byte)0x00);
                     return basePtr;
@@ -2589,8 +3290,149 @@
                     if (b != 0x00 && b != 0xFF) break;
                     len--;
                 }
+                if (len <= 0) return string.Empty;
                 return Encoding.UTF8.GetString(raw.Slice(0, len));
             }
+            #region Tuple
+            public int AllocateTuple(List<(Ast.ValueType t, object? v, int namePtr)> list)
+            {
+                int total = 0;
+                foreach (var (t, v, _) in list)
+                    total += 1 + (Ast.IsReferenceType(t) ? sizeof(int) : GetTypeSize(t)) + sizeof(int);
+
+                int ptr = Malloc(total, Ast.ValueType.Tuple, isArray: false);
+                int w = ptr;
+                foreach (var (t, v, namePtr) in list)
+                {
+                    _memory[w++] = (byte)t;
+
+                    if (Ast.IsReferenceType(t))
+                    {
+                        int child;
+                        if (v is null) child = -1;
+                        else if (t == Ast.ValueType.String && v is string s) child = PackReference(s, Ast.ValueType.String);
+                        else if (v is int p && p >= StackSize) child = p;
+                        else if (t == Ast.ValueType.Object) child = PackReference(v, Ast.ValueType.Object);
+                        else child = Convert.ToInt32(v);
+
+                        BitConverter.GetBytes(child).CopyTo(_memory, w);
+                        w += sizeof(int);
+                    }
+                    else
+                    {
+                        ReadOnlySpan<byte> src = GetSourceBytes(t, v);
+                        src.CopyTo(_memory.AsSpan(w, src.Length));
+                        w += src.Length;
+                    }
+                    BitConverter.GetBytes(namePtr).CopyTo(_memory, w);
+                    w += sizeof(int);
+                }
+                return ptr;
+            }
+            public List<(Ast.ValueType type, object? value, int namePtr)> ReadTuple(int ptr)
+            {
+                if (GetHeapObjectType(ptr) != Ast.ValueType.Tuple)
+                    throw new ApplicationException("Value is not a tuple");
+                int end = ptr + GetHeapObjectLength(ptr);
+                int r = ptr;
+                List<(Ast.ValueType type, object? value, int namePtr)> ret = new();
+                while (r < end)
+                {
+                    var t = (Ast.ValueType)_memory[r++];
+                    object? val;
+
+                    if (Ast.IsReferenceType(t))
+                    {
+                        int h = BitConverter.ToInt32(_memory, r); r += sizeof(int);
+                        if (h <= 0) val = null;
+                        else if (t == Ast.ValueType.String) val = ReadHeapString(h);
+                        else if (t == Ast.ValueType.Object) val = GetObject(h);
+                        else if (t == Ast.ValueType.Nullable)
+                        {
+                            var baseT = (Ast.ValueType)_memory[h];
+                            int addr = h + 1;
+                            val = Ast.IsReferenceType(baseT) ? DerefReference(addr, baseT) : ReadFromStack(addr, baseT);
+                        }
+                        else
+                        {
+                            val = h;
+                        }
+                    }
+                    else
+                    {
+                        int sz = GetTypeSize(t);
+                        ValidateAddress(r, sz);
+                        val = ReadFromStack(r, t);
+                        r += sz;
+                    }
+
+                    int namePtr = BitConverter.ToInt32(_memory, r); r += sizeof(int);
+                    ret.Add((t, val, namePtr));
+                }
+                return ret;
+            }
+            public void DeconstructAssign(string[] names, object? rhs)
+            {
+                if (rhs is not int ptr || ptr < StackSize || GetHeapObjectType(ptr) != Ast.ValueType.Tuple)
+                    throw new ApplicationException("Right side is not a tuple");
+
+                var elems = ReadTuple(ptr);
+                if (elems.Count != names.Length)
+                    throw new ApplicationException($"Tuple arity mismatch: {elems.Count} vs {names.Length}");
+                for (int i = 0; i < names.Length; i++)
+                {
+                    string name = names[i];
+                    if (name == "_") continue; //discard
+
+                    var (t, v, _) = elems[i];
+
+                    if (HasVariable(name))
+                    {
+                        var varInfo = Get(name);
+                        if (varInfo.Type == Ast.ValueType.String)
+                        {
+                            int oldPtr = Convert.ToInt32(ReadVariable(name));
+
+                            if (v is null)
+                            {
+                                if (oldPtr >= StackSize) Free(oldPtr);
+                                WriteVariable(name, -1);
+                            }
+                            else if (v is int sptr && sptr >= StackSize)
+                            {
+                                if (oldPtr >= StackSize) Free(oldPtr);
+                                WriteVariable(name, sptr);
+                            }
+                            else
+                            {
+                                StoreStringVariable(name, v.ToString()!);
+                            }
+                            continue;
+                        }
+                        if (Ast.IsReferenceType(varInfo.Type))
+                        {
+                            int oldPtr = Convert.ToInt32(ReadVariable(name));
+                            if (oldPtr >= StackSize) Free(oldPtr);
+
+                            int packed = (v is int p && p >= StackSize) ? p : PackReference(v!, varInfo.Type);
+
+                            WriteVariable(name, packed);
+                            continue;
+                        }
+                        if (!MatchVariableType(v, varInfo.Type) && varInfo.Type != Ast.ValueType.Object)
+                            v = Cast(v!, varInfo.Type);
+
+                        WriteVariable(name, v!);
+                    }
+                    else
+                    {
+                        var declType = t;
+                        if (declType == Ast.ValueType.Tuple) declType = Ast.ValueType.Object;
+                        Declare(name, declType, v!);
+                    }
+                }
+            }
+            #endregion
             #region Array helpers
             public void ArrayResize(string name, int newLength)
             {
@@ -2616,7 +3458,7 @@
                 if (newLength == oldLength)
                     return oldPtr;
 
-                int newPtr = Malloc(requiredBytes, elemType);
+                int newPtr = Malloc(requiredBytes, elemType, isArray: true);
                 int copyBytes = Math.Min(oldBytes, requiredBytes);
                 if (copyBytes > 0)
                     _memory.AsSpan(oldPtr, copyBytes).CopyTo(_memory.AsSpan(newPtr, copyBytes));
@@ -2666,7 +3508,7 @@
                 int oldLength = oldBytes / elemSize;
                 int needBytes = checked((oldLength + 1) * elemSize);
 
-                int newPtr = Malloc(needBytes, elemType);
+                int newPtr = Malloc(needBytes, elemType, isArray: true);
                 _memory.AsSpan(ptr, oldBytes)
                        .CopyTo(_memory.AsSpan(newPtr, oldBytes));
                 _memory.AsSpan(newPtr + oldBytes, needBytes - oldBytes).Clear();
@@ -2701,7 +3543,7 @@
                     throw new ArgumentException($"Type mismatch while inserting into array, adding {incomingType} to {elemType}");
 
                 int needBytes = checked((length + 1) * elemSize);
-                int newPtr = Malloc(needBytes, elemType);
+                int newPtr = Malloc(needBytes, elemType, isArray: true);
 
                 _memory.AsSpan(ptr, index * elemSize).CopyTo(_memory.AsSpan(newPtr, index * elemSize));
                 ReadOnlySpan<byte> src = GetSourceBytes(element);
@@ -2766,7 +3608,7 @@
                     throw new ArgumentOutOfRangeException(nameof(index));
 
                 int newBytes = (length - 1) * elemSize;
-                int newPtr = Malloc(newBytes, elemType);
+                int newPtr = Malloc(newBytes, elemType, isArray: true);
 
                 _memory.AsSpan(ptr, index * elemSize)
                        .CopyTo(_memory.AsSpan(newPtr, index * elemSize));
@@ -2794,7 +3636,7 @@
                 int bytes2 = GetHeapObjectLength(secondPtr);
 
                 int newBytes = checked(bytes1 + bytes2);
-                int newPtr = Malloc(newBytes, elemType1);
+                int newPtr = Malloc(newBytes, elemType1, isArray: true);
 
                 _memory.AsSpan(firstPtr, bytes1).CopyTo(_memory.AsSpan(newPtr, bytes1));
                 _memory.AsSpan(secondPtr, bytes2).CopyTo(_memory.AsSpan(newPtr + bytes1, bytes2));
@@ -2826,7 +3668,7 @@
                 int newPtr;
                 if (IsReferenceType(elemType))
                 {
-                    newPtr = Malloc(sizeof(int) * len, elemType);
+                    newPtr = Malloc(sizeof(int) * len, elemType, isArray: true);
                     for (int i = 0; i < len; i++)
                     {
                         Check();
@@ -2843,7 +3685,7 @@
                 }
                 else
                 {
-                    newPtr = Malloc(eSize * len, elemType);
+                    newPtr = Malloc(eSize * len, elemType, isArray: true);
                     for (int i = 0; i < len; i++)
                     {
                         Check();
@@ -2886,7 +3728,7 @@
                 int newPtr;
                 if (IsReferenceType(elemType))
                 {
-                    newPtr = Malloc(sizeof(int) * len, elemType);
+                    newPtr = Malloc(sizeof(int) * len, elemType, isArray: true);
                     for (int i = 0; i < len; i++)
                     {
                         Check();
@@ -2903,7 +3745,7 @@
                 }
                 else
                 {
-                    newPtr = Malloc(eSize * len, elemType);
+                    newPtr = Malloc(eSize * len, elemType, isArray: true);
                     for (int i = 0; i < len; i++)
                     {
                         Check();
@@ -2932,7 +3774,7 @@
                 int lambdaId = Convert.ToInt32(selector);
                 object?[] dst = new object?[len];
                 for (int i = 0; i < len; i++)
-                    dst[i] = InvokeById(lambdaId, src[i]);
+                    dst[i] = InvokeById(lambdaId, src[i]!);
 
                 ValueType dstElemType = ValueType.Object;
                 object? sample = dst.FirstOrDefault(v => v is not null);
@@ -2945,7 +3787,7 @@
                 int newPtr;
                 if (IsReferenceType(dstElemType))
                 {
-                    newPtr = Malloc(sizeof(int) * len, dstElemType);
+                    newPtr = Malloc(sizeof(int) * len, dstElemType, isArray: true);
                     for (int i = 0; i < len; i++)
                     {
                         Check();
@@ -2963,7 +3805,7 @@
                 else
                 {
                     int dstSize = GetTypeSize(dstElemType);
-                    newPtr = Malloc(dstSize * len, dstElemType);
+                    newPtr = Malloc(dstSize * len, dstElemType, isArray: true);
 
                     for (int i = 0; i < len; i++)
                     {
@@ -3017,7 +3859,7 @@
                 int newPtr;
                 if (IsReferenceType(elemType))
                 {
-                    newPtr = Malloc(sizeof(int) * outLen, elemType);
+                    newPtr = Malloc(sizeof(int) * outLen, elemType, isArray: true);
                     for (int i = 0; i < outLen; i++)
                     {
                         Check();
@@ -3034,7 +3876,7 @@
                 }
                 else
                 {
-                    newPtr = Malloc(eSize * outLen, elemType);
+                    newPtr = Malloc(eSize * outLen, elemType, isArray: true);
                     for (int i = 0; i < outLen; i++)
                     {
                         Check();
@@ -3047,12 +3889,12 @@
             public int ArrayRange(int start, int end)
             {
                 int len = Math.Abs(end - start);
-                int ptr = Malloc(sizeof(int) * len, ValueType.Int);
+                int ptr = Malloc(sizeof(int) * len, ValueType.Int, isArray: true);
 
                 for (int i = 0, v = start, step = end >= start ? 1 : -1; i < len; i++, v += step)
                 {
                     Check();
-                    BitConverter.GetBytes(v) .CopyTo(RawMemory, ptr + i * sizeof(int));
+                    BitConverter.GetBytes(v).CopyTo(RawMemory, ptr + i * sizeof(int));
                 }
                 return ptr;
             }
@@ -3069,9 +3911,9 @@
 
                 int sliceLen = end - start;
                 if (sliceLen == 0)
-                    return Malloc(0, elemType);
+                    return Malloc(0, elemType, isArray: true);
 
-                int newPtr = Malloc(sliceLen * elemSize, elemType);
+                int newPtr = Malloc(sliceLen * elemSize, elemType, isArray: true);
                 _memory.AsSpan(ptr + start * elemSize, sliceLen * elemSize)
                        .CopyTo(_memory.AsSpan(newPtr, sliceLen * elemSize));
 
@@ -3092,7 +3934,7 @@
                     object? val = IsReferenceType(elemType)
                                     ? DerefReference(addr, elemType)
                                     : ReadFromStack(addr, elemType);
-                    if (Convert.ToBoolean(InvokeById(lambdaId, val)))
+                    if (Convert.ToBoolean(InvokeById(lambdaId, val!)))
                         return true;
                 }
                 return false;
@@ -3112,7 +3954,7 @@
                     object? val = IsReferenceType(elemType)
                                     ? DerefReference(addr, elemType)
                                     : ReadFromStack(addr, elemType);
-                    if (!Convert.ToBoolean(InvokeById(lambdaId, val)))
+                    if (!Convert.ToBoolean(InvokeById(lambdaId, val!)))
                         return false;
                 }
                 return true;
@@ -3245,20 +4087,24 @@
                 else
                     throw new ApplicationException($"GetSourceBytes: Unsupported element type {data.GetType()}");
             }
-            private object? DefaultValue(ValueType vt) => vt switch
+            public static object? DefaultValue(ValueType vt) => vt switch
             {
-                ValueType.Bool => false,
-                ValueType.Char => '\0',
-                ValueType.Byte => (byte)0,
-                ValueType.Sbyte => (sbyte)0,
-                ValueType.Short => (short)0,
-                ValueType.UShort => (ushort)0,
-                ValueType.Int => 0,
-                ValueType.Uint => 0U,
-                ValueType.Long => 0L,
-                ValueType.Ulong => 0UL,
-                ValueType.Float => 0f,
-                ValueType.Double => 0d,
+                Ast.ValueType.Bool => false,
+                Ast.ValueType.Char => '\0',
+                Ast.ValueType.Byte => (byte)0,
+                Ast.ValueType.Sbyte => (sbyte)0,
+                Ast.ValueType.Short => (short)0,
+                Ast.ValueType.UShort => (ushort)0,
+                Ast.ValueType.Int => 0,
+                Ast.ValueType.Uint => 0U,
+                Ast.ValueType.Long => 0L,
+                Ast.ValueType.Ulong => 0UL,
+                Ast.ValueType.Float => 0f,
+                Ast.ValueType.Double => 0d,
+                Ast.ValueType.Decimal => 0m,
+                Ast.ValueType.IntPtr => 0,
+                Ast.ValueType.DateTime => new DateTime(0),
+                Ast.ValueType.TimeSpan => new TimeSpan(0),
                 _ => null
             };
             public object? DerefReference(int addr, ValueType vt)
@@ -3270,12 +4116,13 @@
                     case Ast.ValueType.Object: return GetObject(handle);
                     case Ast.ValueType.Array: return handle <= 0 ? null : handle;
                     case Ast.ValueType.Struct: return handle <= 0 ? null : handle;
-                    case Ast.ValueType.Nullable: if (handle <= 0) return null; var baseT = (ValueType)RawMemory[handle];
+                    case Ast.ValueType.Nullable:
+                        if (handle <= 0) return null; var baseT = (ValueType)RawMemory[handle];
                         return ReadFromMemorySlice(RawMemory[(handle + 1)..(handle + 1 + GetTypeSize(baseT))], baseT);
                     default: return handle <= 0 ? null : handle;
                 }
             }
-            
+
 
 
             #endregion
@@ -3328,7 +4175,7 @@
                         if (!IsReferenceType(info.Item2))
                         {
                             int length = GetTypeSize(info.Item2) * info.Item1;
-                            var address = Malloc(length, info.Item2);
+                            var address = Malloc(length, info.Item2, isArray: true);
                             var pointer = Stackalloc(ValueType.Array);
                             _scopes.Peek()[name] = pointer;
                             WriteVariable(name, address);
@@ -3336,12 +4183,40 @@
                         else if (IsReferenceType(info.Item2))
                         {
                             int bytes = sizeof(int) * info.Item1;
-                            int basePtr = Malloc(bytes, info.Item2);
-                            _memory.AsSpan(basePtr, bytes).Fill(0xFF); //-1 = null
+                            int basePtr = Malloc(bytes, info.Item2, isArray: true);
+                            _memory.AsSpan(basePtr, bytes).Fill(0xFF);
                             var varSlot = Stackalloc(ValueType.Array);
                             _scopes.Peek()[name] = varSlot;
                             WriteVariable(name, basePtr);
                         }
+                    }
+                    else if (value is ValueTuple<object?[], ValueType> arr)
+                    {
+                        object?[] vals = arr.Item1;
+                        ValueType elemT = arr.Item2;
+                        int basePtr;
+                        if (IsReferenceType(elemT))
+                        {
+                            basePtr = Malloc(sizeof(int) * vals.Length, elemT, isArray: true);
+                            for (int i = 0; i < vals.Length; i++)
+                            {
+                                int packed = PackReference(vals[i]!, elemT);
+                                BitConverter.GetBytes(packed).CopyTo(_memory, basePtr + i * sizeof(int));
+                            }
+                        }
+                        else
+                        {
+                            int elemSize = GetTypeSize(elemT);
+                            basePtr = Malloc(elemSize * vals.Length, elemT, isArray: true);
+                            for (int i = 0; i < vals.Length; i++)
+                            {
+                                ReadOnlySpan<byte> src = GetSourceBytes(elemT, vals[i]!);
+                                src.CopyTo(_memory.AsSpan(basePtr + i * elemSize, elemSize));
+                            }
+                        }
+                        var slot = Stackalloc(ValueType.Array);
+                        _scopes.Peek()[name] = slot;
+                        WriteVariable(name, basePtr);
                     }
                     else if (value is int ptr)
                     {
@@ -3549,10 +4424,11 @@
                 }
             }
             #region Seialization
+
             public int SerializeJson(int anyPtr, int depthLimit = 8)
             {
                 const int MaxOutBytes = 256 * 1024;
-                const int HardMaxDepth = 32; 
+                const int HardMaxDepth = 32;
                 const int MaxStringBytes = 64 * 1024;
                 const int MaxArrayElements = 16_384;
                 const int MaxStructFields = 1_024;
@@ -3629,13 +4505,106 @@
                     var raw = HeapSpan(ptr);
                     PutQuotedUtf8(raw);
                 }
-
                 void PutNullableFromHeap(int ptr)
                 {
                     if (ptr < StackSize) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
                     var baseT = (Ast.ValueType)mem[ptr];
                     int valAddr = ptr + 1;
                     PutValue(baseT, valAddr, isHeapPayload: true, depth: 0);
+                }
+                void PutTupleFromHeap(int ptr, int depth)
+                {
+                    if (depth <= 0 || ptr < StackSize) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    var items = ReadTuple(ptr);
+                    bool anyNames = false;
+                    int count = 0;
+                    foreach (var it in items) { if (it.namePtr >= StackSize) anyNames = true; count++; }
+                    void PutManagedString(string s)
+                    {
+                        Ensure(1); buf[w++] = QUOTE;
+                        var raw = System.Text.Encoding.UTF8.GetBytes(s);
+                        for (int i = 0; i < raw.Length; i++) PutEscByte(raw[i]);
+                        Ensure(1); buf[w++] = QUOTE;
+                    }
+                    void PutTupleValue(Ast.ValueType et, object? v, int d)
+                    {
+                        if (v is null) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+
+                        if (Ast.IsReferenceType(et))
+                        {
+                            if (et == Ast.ValueType.String) { PutManagedString((string)v); return; }
+                            if (et == Ast.ValueType.Struct) { PutStructInstance(Convert.ToInt32(v), d - 1); return; }
+                            if (et == Ast.ValueType.Array) { PutArrayFromHeap(Convert.ToInt32(v), d - 1); return; }
+                            if (et == Ast.ValueType.Nullable)
+                            {
+                                var ov = v;
+                                if (ov is string sv) { PutManagedString(sv); return; }
+                                if (ov is int hp)
+                                {
+                                    var ht = GetHeapObjectType(hp);
+                                    if (ht == Ast.ValueType.Struct) { PutStructInstance(hp, d - 1); return; }
+                                    if (ht == Ast.ValueType.Array) { PutArrayFromHeap(hp, d - 1); return; }
+                                }
+                            }
+                            var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return;
+                        }
+
+                        // value types
+                        switch (et)
+                        {
+                            case Ast.ValueType.Bool: PutBool(Convert.ToBoolean(v)); break;
+                            case Ast.ValueType.Int: PutInt32(Convert.ToInt32(v)); break;
+                            case Ast.ValueType.Uint: PutUInt32(Convert.ToUInt32(v)); break;
+                            case Ast.ValueType.Long: PutInt64(Convert.ToInt64(v)); break;
+                            case Ast.ValueType.Ulong: PutUInt64(Convert.ToUInt64(v)); break;
+                            case Ast.ValueType.Double: PutDouble(Convert.ToDouble(v, System.Globalization.CultureInfo.InvariantCulture)); break;
+                            case Ast.ValueType.Float: PutFloat(Convert.ToSingle(v, System.Globalization.CultureInfo.InvariantCulture)); break;
+                            case Ast.ValueType.Char: PutChar(Convert.ToUInt16(v)); break;
+                            default:
+                                PutManagedString(Convert.ToString(v, System.Globalization.CultureInfo.InvariantCulture) ?? "");
+                                break;
+                        }
+                    }
+                    if (!anyNames)
+                    {
+                        Ensure(1); buf[w++] = LSB;
+                        int idx = 0;
+                        foreach (var (et, val, _) in ReadTuple(ptr))
+                        {
+                            if (idx++ != 0) { Ensure(1); buf[w++] = COM; }
+                            PutTupleValue(et, val, depth);
+                        }
+                        Ensure(1); buf[w++] = RSB;
+                    }
+                    else
+                    {
+                        Ensure(1); buf[w++] = LBR;
+                        // "$tuple"
+                        Ensure(1); buf[w++] = QUOTE; var k1 = "$tuple"u8; Ensure(k1.Length); k1.CopyTo(buf.AsSpan(w)); w += k1.Length; Ensure(1); buf[w++] = QUOTE; Ensure(1); buf[w++] = COL;
+                        Ensure(1); buf[w++] = LSB;
+                        int idx = 0;
+                        var again = ReadTuple(ptr);
+                        foreach (var (et, val, _) in again)
+                        {
+                            if (idx++ != 0) { Ensure(1); buf[w++] = COM; }
+                            PutTupleValue(et, val, depth);
+                        }
+                        Ensure(1); buf[w++] = RSB;
+                        // "$names"
+                        Ensure(1); buf[w++] = COM;
+                        Ensure(1); buf[w++] = QUOTE; var k2 = "$names"u8; Ensure(k2.Length); k2.CopyTo(buf.AsSpan(w)); w += k2.Length; Ensure(1); buf[w++] = QUOTE; Ensure(1); buf[w++] = COL;
+                        Ensure(1); buf[w++] = LSB;
+                        idx = 0;
+                        foreach (var (_, __, namePtr) in ReadTuple(ptr))
+                        {
+                            if (idx++ != 0) { Ensure(1); buf[w++] = COM; }
+                            string name = namePtr >= StackSize ? ReadHeapString(namePtr) : $"Item{idx}";
+                            PutManagedString(name);
+                        }
+                        Ensure(1); buf[w++] = RSB;
+
+                        Ensure(1); buf[w++] = RBR;
+                    }
                 }
                 void PutArrayFromHeap(int ptr, int depth)
                 {
@@ -3729,7 +4698,7 @@
                     {
                         Check();
                         if (fields++ >= MaxStructFields) throw new ApplicationException("Too many struct fields");
-                        Ast.ValueType fieldType = (Ast.ValueType)sig[s++]; 
+                        Ast.ValueType fieldType = (Ast.ValueType)sig[s++];
                         if (s >= sigLen) break;
                         int nameLen = sig[s++];
                         if (nameLen < 0 || nameLen > MaxStringBytes) throw new ApplicationException("Field name too large");
@@ -3742,7 +4711,8 @@
                         Ast.ValueType instFieldType = (Ast.ValueType)mem[val++];
                         int payloadSize = IsRef(instFieldType) ? sizeof(int) : GetTypeSize(instFieldType);
 
-                        if (!first) { Ensure(1); buf[w++] = COM; } first = false;
+                        if (!first) { Ensure(1); buf[w++] = COM; }
+                        first = false;
                         Ensure(1); buf[w++] = QUOTE; for (int i = 0; i < nameBytes.Length; i++) PutEscByte(nameBytes[i]); Ensure(1); buf[w++] = QUOTE; Ensure(1); buf[w++] = COL;
                         PutValue(instFieldType, val, isHeapPayload: true, depth: depth);
 
@@ -3758,6 +4728,7 @@
                     var t = GetHeapObjectType(inst);
                     if (t == Ast.ValueType.String) { PutStringFromHeap(inst); }
                     else if (t == Ast.ValueType.Nullable) { PutNullableFromHeap(inst); }
+                    else if (t == Ast.ValueType.Tuple) { PutTupleFromHeap(inst, depthLimit); }
                     else
                     {
                         int sigPtr = BitConverter.ToInt32(mem, inst);
@@ -3926,6 +4897,51 @@
                 }
                 int BuildObject(List<(string Key, object? Val)> fields)
                 {
+                    int tupleIdx = fields.FindIndex(p => p.Key == "$tuple");
+                    if (tupleIdx >= 0)
+                    {
+                        var rawVals = fields[tupleIdx].Val as List<object?> ?? new List<object?>();
+                        var rawNames = (fields.Find(p => p.Key == "$names").Val as List<object?>);
+                        var items = new List<(Ast.ValueType Type, object? Value, int NamePtr)>(rawVals.Count);
+                        int i = 0;
+                        foreach (var v in rawVals)
+                        {
+                            Ast.ValueType et;
+                            object? payload;
+                            switch (v)
+                            {
+                                case null:
+                                    et = Ast.ValueType.Object; payload = null; break;
+                                case string s:
+                                    et = Ast.ValueType.String; payload = s; break;
+                                case bool b:
+                                    et = Ast.ValueType.Bool; payload = b; break;
+                                case int iv:
+                                    et = Ast.ValueType.Int; payload = iv; break;
+                                case long lv:
+                                    et = Ast.ValueType.Long; payload = lv; break;
+                                case double dv:
+                                    et = Ast.ValueType.Double; payload = dv; break;
+
+                                case List<object?> arr:
+                                    et = Ast.ValueType.Array; payload = BuildArray(arr, out _); break;
+
+                                case List<(string Key, object? Val)> o2:
+                                    et = Ast.ValueType.Struct; payload = BuildObject(o2); break;
+
+                                default:
+                                    et = Ast.ValueType.String; payload = v.ToString(); break;
+                            }
+
+                            int namePtr = -1;
+                            if (rawNames != null && i < rawNames.Count && rawNames[i] is string ns)
+                                namePtr = PackReference(ns, Ast.ValueType.String);
+
+                            items.Add((et, payload, namePtr));
+                            i++;
+                        }
+                        return AllocateTuple(items);
+                    }
                     var names = fields;
                     var declTypes = new List<ValueType>(names.Count);
                     var instTypes = new List<ValueType>(names.Count);
@@ -4041,7 +5057,12 @@
                             case bool: anyBool = true; break;
                             case double: anyDouble = true; break;
                             case long: anyLong = true; break;
-                            case int: anyInt = true; break;
+                            case int iv:
+                                if (iv >= StackSize && GetHeapObjectType(iv) == ValueType.Struct)
+                                    anyObj = true;
+                                else
+                                    anyInt = true;
+                                break;
                             case List<object?>: anyArr = true; break;
                             case List<(string Key, object? Val)>: anyObj = true; break;
                             default: throw new ApplicationException($"Array: unsupported element {v.GetType()}");
@@ -4076,7 +5097,7 @@
                         if ((ValueType)baseType == ValueType.Object || (ValueType)baseType == ValueType.String)
                             throw new ApplicationException("Array: nullable supported only for value types");
 
-                        int basePtr = Malloc(sizeof(int) * n, ValueType.Nullable);
+                        int basePtr = Malloc(sizeof(int) * n, ValueType.Nullable, isArray: true);
                         for (int idx = 0; idx < n; idx++)
                         {
                             object? v = items[idx];
@@ -4088,7 +5109,7 @@
 
                     if (IsReferenceType(elemHeaderType))
                     {
-                        int basePtr = Malloc(sizeof(int) * n, elemHeaderType);
+                        int basePtr = Malloc(sizeof(int) * n, elemHeaderType, isArray: true);
                         for (int idx = 0; idx < n; idx++)
                         {
                             Check();
@@ -4098,7 +5119,13 @@
                             if (v is null) p = -1;
                             else if (elemHeaderType == ValueType.String) p = PackReference((string)v, ValueType.String);
                             else if (elemHeaderType == ValueType.Array) p = BuildArray((System.Collections.Generic.List<object?>)v, out _);
-                            else if (elemHeaderType == ValueType.Struct) p = BuildObject((System.Collections.Generic.List<(string Key, object? Val)>)v);
+                            else if (elemHeaderType == ValueType.Struct)
+                            {
+                                if (v is int sp)
+                                    p = sp;
+                                else
+                                    p = BuildObject((List<(string Key, object? Val)>)v);
+                            }
                             else p = -1;
                             BitConverter.GetBytes(p).CopyTo(RawMemory, cell);
                         }
@@ -4107,7 +5134,7 @@
                     else
                     {
                         int elemSize = GetTypeSize(elemHeaderType);
-                        int basePtr = Malloc(n * elemSize, elemHeaderType);
+                        int basePtr = Malloc(n * elemSize, elemHeaderType, isArray: true);
                         for (int idx = 0; idx < n; idx++)
                         {
                             Check();
@@ -4218,7 +5245,7 @@
                 var ast = parser.ParseProgram();
                 RootNode = ast;
                 if (printTree) RootNode.Print();
-                RootNode.Evaluate(this.Context); 
+                RootNode.Evaluate(this.Context);
             }
             catch (OperationCanceledException)
             {
@@ -4239,7 +5266,7 @@
         }
         public enum ValueType
         {
-            Int, String, Bool, Double, Ulong, Uint, Long, Byte, Object, Sbyte, Short, Char, UShort, Float, Decimal, IntPtr, Array, Enum, Nullable, Struct, DateTime, TimeSpan
+            Int, String, Bool, Double, Ulong, Uint, Long, Byte, Object, Sbyte, Short, Char, UShort, Float, Decimal, IntPtr, Array, Enum, Nullable, Struct, DateTime, TimeSpan, Tuple
         }
         public enum Associativity { Left, Right }
         public enum OperatorToken
@@ -4322,48 +5349,49 @@
         }
         private static readonly Dictionary<OperatorToken, OperatorInfo> _operatorTable = new()
         {
-            { OperatorToken.Not, new OperatorInfo(3, Associativity.Right) },
-            { OperatorToken.Increment, new OperatorInfo(3, Associativity.Right) },
-            { OperatorToken.Decrement, new OperatorInfo(3, Associativity.Right) },
-            { OperatorToken.AddressOf, new OperatorInfo(3, Associativity.Right) },
-            { OperatorToken.BitComplement, new OperatorInfo(3, Associativity.Right) },
+            { OperatorToken.Increment, new OperatorInfo(15, Associativity.Right) },
+            { OperatorToken.Decrement, new OperatorInfo(15, Associativity.Right) },
+            { OperatorToken.Not, new OperatorInfo(14, Associativity.Right) },
+            { OperatorToken.AddressOf, new OperatorInfo(14, Associativity.Right) },
+            { OperatorToken.BitComplement, new OperatorInfo(14, Associativity.Right) },
 
-            { OperatorToken.Multiply, new OperatorInfo(5, Associativity.Left) },
-            { OperatorToken.Divide, new OperatorInfo(5, Associativity.Left) },
-            { OperatorToken.MultiplyEqual, new OperatorInfo(3, Associativity.Left) },
-            { OperatorToken.DivideEqual, new OperatorInfo(3, Associativity.Left) },
-            { OperatorToken.Module, new OperatorInfo(5, Associativity.Left) },
-            { OperatorToken.ModuleEqual, new OperatorInfo(3, Associativity.Left) },
-            { OperatorToken.Pow, new OperatorInfo(6, Associativity.Right) },
-            { OperatorToken.RightShift, new OperatorInfo(5, Associativity.Left) },
-            { OperatorToken.RightShiftEqual, new OperatorInfo(3, Associativity.Left) },
-            { OperatorToken.LeftShift, new OperatorInfo(5, Associativity.Left) },
-            { OperatorToken.LeftShiftEqual, new OperatorInfo(3, Associativity.Left) },
-            { OperatorToken.UnsignedRightShift, new OperatorInfo(5, Associativity.Left) },
-            { OperatorToken.UnsignedRightShiftEqual, new OperatorInfo(3, Associativity.Left) },
+            { OperatorToken.Pow, new OperatorInfo(13, Associativity.Right) },
+            { OperatorToken.Multiply, new OperatorInfo(12, Associativity.Left) },
+            { OperatorToken.Divide, new OperatorInfo(12, Associativity.Left) },
+            { OperatorToken.Module, new OperatorInfo(12, Associativity.Left) },
 
-            { OperatorToken.Plus, new OperatorInfo(4, Associativity.Left) },
-            { OperatorToken.Minus, new OperatorInfo(4, Associativity.Left) },
-            { OperatorToken.PlusEqual, new OperatorInfo(3, Associativity.Left) },
-            { OperatorToken.MinusEqual, new OperatorInfo(3, Associativity.Left) },
+            { OperatorToken.Plus, new OperatorInfo(11, Associativity.Left) },
+            { OperatorToken.Minus, new OperatorInfo(11, Associativity.Left) },
+            { OperatorToken.RightShift, new OperatorInfo(10, Associativity.Left) },
+            { OperatorToken.LeftShift, new OperatorInfo(10, Associativity.Left) },
+            { OperatorToken.UnsignedRightShift, new OperatorInfo(10, Associativity.Left) },
+            { OperatorToken.Greater, new OperatorInfo(9, Associativity.Left) },
+            { OperatorToken.Less, new OperatorInfo(9, Associativity.Left) },
+            { OperatorToken.LessOrEqual, new OperatorInfo(9, Associativity.Left) },
+            { OperatorToken.GreaterOrEqual, new OperatorInfo(9, Associativity.Left) },
+            { OperatorToken.Equal, new OperatorInfo(8, Associativity.Left) }, // ==
+            { OperatorToken.NotEqual, new OperatorInfo(8, Associativity.Left) },
+            { OperatorToken.BitXor, new OperatorInfo(6, Associativity.Left) },
+            { OperatorToken.BitAnd, new OperatorInfo(7, Associativity.Left) },
+            { OperatorToken.BitOr, new OperatorInfo(5, Associativity.Left) },
+            { OperatorToken.And, new OperatorInfo(4, Associativity.Left) },
+            { OperatorToken.Or, new OperatorInfo(3, Associativity.Left) },
+            { OperatorToken.NullDefault, new OperatorInfo(2, Associativity.Right) },
 
-            { OperatorToken.Greater, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.Less, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.Equal, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.NotEqual, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.LessOrEqual, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.GreaterOrEqual, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.Equals, new OperatorInfo(1, Associativity.Left) },
-            { OperatorToken.And, new OperatorInfo(1, Associativity.Left) },
-            { OperatorToken.Or, new OperatorInfo(1, Associativity.Left) },
-            { OperatorToken.BitXor, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.BitXorEqual, new OperatorInfo(1, Associativity.Left) },
-            { OperatorToken.BitAnd, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.BitAndEqual, new OperatorInfo(1, Associativity.Left) },
-            { OperatorToken.BitOr, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.BitOrEqual, new OperatorInfo(1, Associativity.Left) },
-            { OperatorToken.NullDefault, new OperatorInfo(2, Associativity.Left) },
-            { OperatorToken.NullDefaultEqual, new OperatorInfo(2, Associativity.Left) },
+            { OperatorToken.Equals, new OperatorInfo(0, Associativity.Right) }, // =
+            { OperatorToken.PlusEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.MinusEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.MultiplyEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.DivideEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.ModuleEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.LeftShiftEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.RightShiftEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.UnsignedRightShiftEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.BitAndEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.BitOrEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.BitXorEqual, new OperatorInfo(0, Associativity.Right) },
+            { OperatorToken.NullDefaultEqual, new OperatorInfo(0, Associativity.Right) }, // ??=
+            //{ OperatorToken.Lambda, new OperatorInfo(0, Associativity.Right) },
         };
         public static bool TryGetOperatorInfo(OperatorToken token, out OperatorInfo? info) =>
         _operatorTable.TryGetValue(token, out info);
@@ -4374,7 +5402,7 @@
         private void ImportStandartLibrary(bool consoleOutput = false)
         {
             var printNames = new string[] { "print", "Console.WriteLine" };
-            for(int i = 0; i < printNames.Length; i++)
+            for (int i = 0; i < printNames.Length; i++)
             {
                 Context.RegisterNative(printNames[i], (string str) => { if (Output.Length + str?.Length < MaxOutputLen) Output += (str + '\n'); if (consoleOutput) Console.WriteLine(str); });
                 Context.RegisterNative(printNames[i], (int str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
@@ -4385,7 +5413,7 @@
                 Context.RegisterNative(printNames[i], (DateTime str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
                 Context.RegisterNative(printNames[i], (TimeSpan str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
             }
-            
+
             this.Context.RegisterNative("Console.Write", (string str) => { if (Output.Length + str?.Length < MaxOutputLen) Output += (str + '\n'); if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (int str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (ulong str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
@@ -4395,11 +5423,13 @@
             this.Context.RegisterNative("Console.Write", (DateTime str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (TimeSpan str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
 
-            this.Context.RegisterNative("typeof", (object o) => { return o is null ? "Null" :o.GetType().Name; });
+            this.Context.RegisterNative("typeof", (object o) => { return o is null ? "Null" 
+                : ( o is int i && i>Context.StackSize && i <Context.StackSize + Context.MemoryUsed ? GetTypeByPtr(i)?.ToString() ?? "null" : o.GetType().Name); });
             this.Context.RegisterNative("sizeof", (object o) => { return Context.GetTypeSize(ExecutionContext.InferType(o)); });
-            this.Context.RegisterNative("TypeOfPtr", (int ptr) => { return GetTypeByPtr(ptr)?.ToString() ?? "null"; });
             this.Context.RegisterNative("Json.Serialize", (int ptr) => { return Context.SerializeJson(ptr); });
             this.Context.RegisterNative("Json.Deserialize", (int ptr) => { return Context.DeserializeJson(ptr); });
+            this.Context.RegisterNative("Xaml.Serialize", (int ptr) => { return -1; });
+            this.Context.RegisterNative("Xaml.Deserialize", (int ptr) => { return -1; });
             this.Context.RegisterNative("Length", (Func<int, int>)Context.GetArrayLength);
             this.Context.RegisterNative("Length", (string str) => str.Length);
             this.Context.RegisterNative("Count", (Func<int, int>)Context.GetArrayLength);
@@ -4414,14 +5444,16 @@
             this.Context.RegisterNative("IndexOf", (Func<int, object, int>)Context.ArrayIndexOf);
             this.Context.RegisterNative("RemoveAt", (Action<string, int>)Context.ArrayRemoveAt);
             this.Context.RegisterNative("RemoveAt", (Func<int, int, int>)Context.ArrayRemoveAt);
-            this.Context.RegisterNative("Remove", (string varName, object value) 
+            this.Context.RegisterNative("Remove", (string varName, object value)
                 => { int i = Context.ArrayIndexOf(varName, value); if (i < 0) return; Context.ArrayRemoveAt(varName, i); });
             this.Context.RegisterNative("Remove", (int ptr, object value)
                 => { int i = Context.ArrayIndexOf(ptr, value); if (i < 0) return ptr; return Context.ArrayRemoveAt(ptr, i); });
             this.Context.RegisterNative("Sort", (int ptr) => Context.ArraySort(ptr, asc: true));
             this.Context.RegisterNative("SortDescending", (int ptr) => Context.ArraySort(ptr, asc: false));
             this.Context.RegisterNative("SortBy", (int ptr, object key) => Context.ArraySortBy(ptr, key, asc: true));
+            this.Context.RegisterNative("OrderBy", (int ptr, object key) => Context.ArraySortBy(ptr, key, asc: true));
             this.Context.RegisterNative("SortByDescending", (int ptr, object key) => Context.ArraySortBy(ptr, key, asc: false));
+            this.Context.RegisterNative("OrderByDescending", (int ptr, object key) => Context.ArraySortBy(ptr, key, asc: false));
             this.Context.RegisterNative("Select", (int ptr, object pred) => Context.ArraySelect(ptr, pred));
             this.Context.RegisterNative("Where", (int ptr, object pred) => Context.ArrayWhere(ptr, pred));
             this.Context.RegisterNative("Any", (int ptr, object pred) => Context.ArrayAny(ptr, pred));
@@ -4431,14 +5463,14 @@
             this.Context.RegisterNative("Count", (int p, object pr) => Context.ArrayCount(p, pr));
             this.Context.RegisterNative("Sum", (int p, object sel) => Context.ArraySum(p, sel));
             this.Context.RegisterNative("First", (int p, object pr) => Context.ArrayFind(p, pr, false, false, false));
-            this.Context.RegisterNative("FirstOrDefault", (int p, object pr) => Context.ArrayFind(p, pr,false, true, false));
+            this.Context.RegisterNative("FirstOrDefault", (int p, object pr) => Context.ArrayFind(p, pr, false, true, false));
             this.Context.RegisterNative("Last", (int p, object pr) => Context.ArrayFind(p, pr, true, false, false));
             this.Context.RegisterNative("LastOrDefault", (int p, object pr) => Context.ArrayFind(p, pr, true, true, false));
             this.Context.RegisterNative("Single", (int p, object pr) => Context.ArrayFind(p, pr, false, false, true));
-            this.Context.RegisterNative("SingleOrDefault", (int p, object pr) => Context.ArrayFind(p, pr, false,true, true));
+            this.Context.RegisterNative("SingleOrDefault", (int p, object pr) => Context.ArrayFind(p, pr, false, true, true));
             this.Context.RegisterNative("Concat", (Func<int, int, int>)Context.ArrayConcat);
             this.Context.RegisterNative("Range", (Func<int, int, int>)Context.ArrayRange);
-            this.Context.RegisterNative("Range", (int start) => Context.ArrayRange(0,start));
+            this.Context.RegisterNative("Range", (int start) => Context.ArrayRange(0, start));
             this.Context.RegisterNative("InRange", (int ptr, int start, int end) => Context.ArraySlice(ptr, start, end));
             this.Context.RegisterNative("InRange", (int ptr, int end) => Context.ArraySlice(ptr, 0, end));
             this.Context.RegisterNative("InRange", (string s, int start, int end) => s.Substring(start, end - start));
@@ -4447,9 +5479,10 @@
             this.Context.RegisterNative("String.IsNullOrEmpty", (string str) => string.IsNullOrEmpty(str));
             this.Context.RegisterNative("IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
             this.Context.RegisterNative("String.IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
-            this.Context.RegisterNative("Substring", (string str, int start)=> Context.PackReference(str.Substring(start), ValueType.String));
-            this.Context.RegisterNative("Substring", (string str, int start, int len)=> Context.PackReference(str.Substring(start, len), ValueType.String));
+            this.Context.RegisterNative("Substring", (string str, int start) => Context.PackReference(str.Substring(start), ValueType.String));
+            this.Context.RegisterNative("Substring", (string str, int start, int len) => Context.PackReference(str.Substring(start, len), ValueType.String));
             this.Context.RegisterNative("Pow", (Func<double, double, double>)Math.Pow);
+            this.Context.RegisterNative("Math.Pow", (Func<double, double, double>)Math.Pow);
             this.Context.RegisterNative("IsDigit", (char c) => { return char.IsDigit(c); });
             this.Context.RegisterNative("Char.IsDigit", (char c) => { return char.IsDigit(c); });
             this.Context.RegisterNative("IsLetter", (char c) => { return char.IsLetter(c); });
@@ -4464,16 +5497,47 @@
             this.Context.RegisterNative("Join", (int varaiable) => { return Join(", ", varaiable); });
             this.Context.RegisterNative("Random.Next", (Func<int, int, int>)Random.Shared.Next);
             this.Context.RegisterNative("Random.Shared.Next", (Func<int, int, int>)Random.Shared.Next);
+            this.Context.RegisterNative("Random.Shared.Next", (Func<int, int>)Random.Shared.Next);
+            this.Context.RegisterNative("Random.Shared.NextDouble", (Func<double>)Random.Shared.NextDouble);
+            #region DateTime
             this.Context.RegisterNative("DateTime.UtcNow", () => { return DateTime.UtcNow; });
+            this.Context.RegisterNative("DateTime.UtcNow.Year", () => { return DateTime.UtcNow.Year; });
+            this.Context.RegisterNative("DateTime.UtcNow.Month", () => { return DateTime.UtcNow.Month; });
+            this.Context.RegisterNative("DateTime.UtcNow.Day", () => { return DateTime.UtcNow.Day; });
+            this.Context.RegisterNative("DateTime.UtcNow.Hour", () => { return DateTime.UtcNow.Hour; });
+            this.Context.RegisterNative("DateTime.UtcNow.Minute", () => { return DateTime.UtcNow.Minute; });
+            this.Context.RegisterNative("DateTime.UtcNow.Second", () => { return DateTime.UtcNow.Second; });
+            this.Context.RegisterNative("DateTime.UtcNow.Microsecond", () => { return DateTime.UtcNow.Microsecond; });
+            this.Context.RegisterNative("DateTime.UtcNow.Millisecond", () => { return DateTime.UtcNow.Millisecond; });
+            this.Context.RegisterNative("DateTime.UtcNow.Nanosecond", () => { return DateTime.UtcNow.Nanosecond; });
+            this.Context.RegisterNative("DateTime.UtcNow.Ticks", () => { return DateTime.UtcNow.Ticks; });
             this.Context.RegisterNative("DateTime.Now", () => { return DateTime.Now; });
+            this.Context.RegisterNative("DateTime.Now.Year", () => { return DateTime.Now.Year; });
+            this.Context.RegisterNative("DateTime.Now.Month", () => { return DateTime.Now.Month; });
+            this.Context.RegisterNative("DateTime.Now.Day", () => { return DateTime.Now.Day; });
+            this.Context.RegisterNative("DateTime.Now.Hour", () => { return DateTime.Now.Hour; });
+            this.Context.RegisterNative("DateTime.Now.Minute", () => { return DateTime.Now.Minute; });
+            this.Context.RegisterNative("DateTime.Now.Second", () => { return DateTime.Now.Second; });
+            this.Context.RegisterNative("DateTime.Now.Microsecond", () => { return DateTime.Now.Microsecond; });
+            this.Context.RegisterNative("DateTime.Now.Millisecond", () => { return DateTime.Now.Millisecond; });
+            this.Context.RegisterNative("DateTime.Now.Nanosecond", () => { return DateTime.Now.Nanosecond; });
+            this.Context.RegisterNative("DateTime.Now.Ticks", () => { return DateTime.Now.Ticks; });
             this.Context.RegisterNative("DateTime.Parse", (string s) => DateTime.Parse(s, CultureInfo.InvariantCulture));
             this.Context.RegisterNative("TimeSpan.Parse", (string s) => TimeSpan.Parse(s, CultureInfo.InvariantCulture));
             this.Context.RegisterNative("Ticks", (DateTime d) => d.Ticks);
             this.Context.RegisterNative("Ticks", (TimeSpan t) => t.Ticks);
-            this.Context.RegisterNative("DateTime.Add", (DateTime d, TimeSpan t) => d+t);
-            this.Context.RegisterNative("DateTime.Subtract", (DateTime d, TimeSpan t) => d-t);
-            this.Context.RegisterNative("TimeSpan.Subtract", (TimeSpan d, TimeSpan t) => d-t);
-            this.Context.RegisterNative("TimeSpan.Add", (TimeSpan d, TimeSpan t) => d+t);
+            this.Context.RegisterNative("DateTime.Add", (DateTime d, TimeSpan t) => d + t);
+            this.Context.RegisterNative("DateTime.Subtract", (DateTime d, TimeSpan t) => d - t);
+            this.Context.RegisterNative("TimeSpan.Subtract", (TimeSpan d, TimeSpan t) => d - t);
+            this.Context.RegisterNative("TimeSpan.Add", (TimeSpan d, TimeSpan t) => d + t);
+            this.Context.RegisterNative("TimeSpan.FromSeconds", (double x) => TimeSpan.FromSeconds(x));
+            this.Context.RegisterNative("TimeSpan.FromMinutes", (double x) => TimeSpan.FromMinutes(x));
+            this.Context.RegisterNative("TimeSpan.FromHours", (double x) => TimeSpan.FromHours(x));
+            this.Context.RegisterNative("TimeSpan.FromDays", (double x) => TimeSpan.FromDays(x));
+            this.Context.RegisterNative("TimeSpan.FromMilliseconds", (double x) => TimeSpan.FromMilliseconds(x));
+            this.Context.RegisterNative("TimeSpan.FromMicroseconds", (double x) => TimeSpan.FromMicroseconds(x));
+            this.Context.RegisterNative("TimeSpan.FromTicks", (long x) => TimeSpan.FromTicks(x));
+            #endregion
             this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object[] callArgs)
                 => InvokeByAttribute(this.Context, attr, attrArgs, callArgs));
             this.Context.RegisterNative("Split", (Func<string, string, int>)Split);
@@ -4494,6 +5558,7 @@
             this.Context.RegisterNative("ToString", (string val) => { return val; });
             this.Context.RegisterNative("ToString", (DateTime val) => { return val.ToString(CultureInfo.InvariantCulture); });
             this.Context.RegisterNative("ToString", (TimeSpan val) => { return val.ToString(); });
+            this.Context.RegisterNative("ToCharArray", (Func<string, int>)ToCharArray);
             this.Context.RegisterNative("IntParse", (string val) => { return int.Parse(val); });
             this.Context.RegisterNative("Int.Parse", (string val) => { return int.Parse(val); });
             this.Context.RegisterNative("IntParse", (char val) => { return (int)(val - '0'); });
@@ -4503,6 +5568,7 @@
             this.Context.RegisterNative("LongParse", (string val) => { return long.Parse(val); });
             this.Context.RegisterNative("Long.Parse", (string val) => { return long.Parse(val); });
             this.Context.RegisterNative("ULongParse", (string val) => { return ulong.Parse(val); });
+            this.Context.RegisterNative("ULong.Parse", (string val) => { return ulong.Parse(val); });
             this.Context.RegisterNative("Ulong.Parse", (string val) => { return ulong.Parse(val); });
             this.Context.RegisterNative("DoubleParse", (string val) => { return double.Parse(val); });
             this.Context.RegisterNative("Double.Parse", (string val) => { return double.Parse(val); });
@@ -4514,23 +5580,29 @@
             this.Context.RegisterNative("Byte.Parse", (string val) => { return byte.Parse(val); });
             this.Context.RegisterNative("ByteParse", (char val) => { return (byte)(val - '0'); });
             this.Context.RegisterNative("Byte.Parse", (char val) => { return (byte)(val - '0'); });
-            this.Context.RegisterNative("Replace", (string str, string old, string newStr)=> { return str.Replace(old, newStr); });
-            this.Context.RegisterNative("Replace", (string str, char old, char newStr)=> { return str.Replace(old, newStr); });
-            this.Context.RegisterNative("Replace", (string str, char old, string newStr)=> { return str.Replace(old.ToString(), newStr); });
+            this.Context.RegisterNative("Replace", (string str, string old, string newStr) => { return str.Replace(old, newStr); });
+            this.Context.RegisterNative("Replace", (string str, char old, char newStr) => { return str.Replace(old, newStr); });
+            this.Context.RegisterNative("Replace", (string str, char old, string newStr) => { return str.Replace(old.ToString(), newStr); });
             this.Context.RegisterNative("Invoke", (Func<object, object>)(id => Context.InvokeById(id)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object>)((id, a1) => Context.InvokeById(id, a1)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object>)((id, a1, a2) => Context.InvokeById(id, a1, a2)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object, object>)((id, a1, a2, a3) => Context.InvokeById(id, a1, a2, a3)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object, object, object>)((id, a1, a2, a3, a4) => Context.InvokeById(id, a1, a2, a3, a4)));
             this.Context.RegisterNative("Free", (Action<int>)Context.Free);
-            this.Context.RegisterNative("PrintMemoryUsage", () => { if (Output.Length < MaxOutputLen) Output += 
-                    ($"{Context.MemoryUsed/1024}Kb {Context.MemoryUsed%1024}B used out of {(Context.RawMemory.Length - Context.StackSize)/1024}Kb total"); });
-            this.Context.RegisterNative("PrintMemoryDump", () => { var mem = Context.PrintMemory(); if (Output.Length+Math.Min(mem.Length, MaxOutputLen-1) < MaxOutputLen) 
-                    Output+= mem.Length > MaxOutputLen-1 ? mem.Substring(0, MaxOutputLen-1) : mem; });
-            this.Context.RegisterNative("GetMemoryUsage", () => { return $"{Context.MemoryUsed / 1024}Kb {Context.MemoryUsed % 1024}B used " +
-                $"out of {(Context.RawMemory.Length - Context.StackSize) / 1024}Kb total"; });
+            this.Context.RegisterNative("PrintMemoryUsage", () => {
+                if (Output.Length < MaxOutputLen) Output +=
+                    ($"{Context.MemoryUsed / 1024}Kb {Context.MemoryUsed % 1024}B used out of {(Context.RawMemory.Length - Context.StackSize) / 1024}Kb total");
+            });
+            this.Context.RegisterNative("PrintMemoryDump", () => {
+                var mem = Context.PrintMemory(); if (Output.Length + Math.Min(mem.Length, MaxOutputLen - 1) < MaxOutputLen)
+                    Output += mem.Length > MaxOutputLen - 1 ? mem.Substring(0, MaxOutputLen - 1) : mem;
+            });
+            this.Context.RegisterNative("GetMemoryUsage", () => {
+                return $"{Context.MemoryUsed / 1024}Kb {Context.MemoryUsed % 1024}B used " +
+                $"out of {(Context.RawMemory.Length - Context.StackSize) / 1024}Kb total";
+            });
             this.Context.RegisterNative("GetMemoryDump", () => { var mem = Context.PrintMemory(); return mem; });
-            this.Context.RegisterNative("GetMemoryDump", (int len) => { var mem = Context.PrintMemory(); return mem.Length>len? mem.Substring(0, len) : mem; });
+            this.Context.RegisterNative("GetMemoryDump", (int len) => { var mem = Context.PrintMemory(); return mem.Length > len ? mem.Substring(0, len) : mem; });
 
         }
         #region Helpers
@@ -4577,9 +5649,9 @@
                 var v = Context.GetVariableByAddress(ptr);
                 return !v.HasValue ? null : v.Value.Type;
             }
-            return this.Context.GetHeapObjectType(ptr);
+            return this.Context.IsArray(ptr) ? ValueType.Array : this.Context.GetHeapObjectType(ptr);
         }
-        private static bool MatchVariableType(object value, ValueType type) => type switch
+        private static bool MatchVariableType(object? value, ValueType type) => value is null ? false : type switch
         {
             ValueType.Int => value is int,
             ValueType.String => value is string,
@@ -4599,10 +5671,11 @@
             ValueType.IntPtr => value is int,
             ValueType.Nullable => value is null || !IsReferenceType(ExecutionContext.InferType(value)),
             ValueType.Struct => value is int,
+            ValueType.Tuple => value is int,
             ValueType.DateTime => value is DateTime,
             ValueType.TimeSpan => value is TimeSpan,
-            ValueType.Array => value is ValueTuple<int, ValueType> 
-            || value is ValueTuple<object?[], ValueType> 
+            ValueType.Array => value is ValueTuple<int, ValueType>
+            || value is ValueTuple<object?[], ValueType>
             || value is int,
             _ => false
         };
@@ -4641,6 +5714,13 @@
             var elemType = Context.GetHeapObjectType(ptr);
             int elemSize = Context.GetTypeSize(elemType);
             int bytes = Context.GetHeapObjectLength(ptr);
+            if (elemType == Ast.ValueType.Tuple)
+            {
+                var parts = new System.Collections.Generic.List<string>();
+                foreach (var (et, val, _) in Context.ReadTuple(ptr))
+                    parts.Add(val?.ToString() ?? string.Empty);
+                return string.Join(separator, parts);
+            }
             var sb = new StringBuilder();
             for (int offset = 0; offset < bytes; offset += elemSize)
             {
@@ -4652,10 +5732,10 @@
                     int strPtr = BitConverter.ToInt32(Context.RawMemory, ptr + offset);
                     if (strPtr > 0)
                     {
-                        slice = Context.ReadHeapString(strPtr); 
+                        slice = Context.ReadHeapString(strPtr);
                     }
                 }
-                else slice = Context.ReadFromMemorySlice(Context.RawMemory[(ptr + offset)..(ptr + offset + elemSize)],elemType);
+                else slice = Context.ReadFromMemorySlice(Context.RawMemory[(ptr + offset)..(ptr + offset + elemSize)], elemType);
                 sb.Append(slice?.ToString() ?? string.Empty);
             }
             return sb.ToString();
@@ -4667,7 +5747,7 @@
             var parts = str.Split(sep);
             int count = parts.Length;
 
-            int arrPtr = this.Context.Malloc(sizeof(int) * count, Ast.ValueType.String);
+            int arrPtr = this.Context.Malloc(sizeof(int) * count, Ast.ValueType.String, isArray: true);
             var span = this.Context.RawMemory.AsSpan(arrPtr, count * sizeof(int));
 
             for (int i = 0; i < count; i++)
@@ -4682,9 +5762,19 @@
 
             return arrPtr;
         }
-        private bool HasAttribute( Ast.ExecutionContext.Function fn, string name, string[] args)
+        private int ToCharArray(string s)
+        {
+            if (s is null) throw new NullReferenceException("null reference in ToCharArray");
+            int len = s.Length;
+            int arrPtr = this.Context.Malloc(len * sizeof(char), Ast.ValueType.Char, isArray: true);
+            var span = this.Context.RawMemory.AsSpan(arrPtr, len * sizeof(char));
+            for (int i = 0; i < len; i++)
+                BitConverter.GetBytes(s[i]).CopyTo(span.Slice(i * sizeof(char)));
+            return arrPtr;
+        }
+        private bool HasAttribute(Ast.ExecutionContext.Function fn, string name, string[] args)
             => fn.Attributes.Any(a => a.Name == name && a.Args.Length == args.Length && a.Args.SequenceEqual(args, StringComparer.Ordinal));
-        
+
         public object? InvokeByAttribute(Ast.ExecutionContext ctx, string attrName, string[] attrArgs, object[] callArgs)
         {
             var candidates = ctx.Functions
@@ -4751,7 +5841,7 @@
                 ctx.ExitFunction();
             }
         }
-        
+
         #endregion
         public struct Variable
         {
@@ -4909,19 +5999,43 @@
 
                     object newVal = Right.Evaluate(context);
 
-                    if (Left is VariableReferenceNode v) 
+                    if (Left is VariableReferenceNode v)
                     {
                         var info = context.Get(v.Name);
-                        if (info.Type == ValueType.String) 
+                        if (info.Type == ValueType.String)
                             context.StoreStringVariable(v.Name, newVal?.ToString() ?? string.Empty);
-                        else context.WriteVariable(v.Name, newVal); 
+                        else context.WriteVariable(v.Name, newVal);
                     }
                     else if (Left is ArrayIndexNode ai) ai.Write(context, newVal);
                     else throw new InvalidOperationException("Left side of ??= must be assignable");
 
                     return newVal!;
                 }
+                if (Op == OperatorToken.Equals && Left is TupleLiteralNode tl)
+                {
+                    var names = new List<string>(tl.Items.Length);
+                    foreach (var (name, expr) in tl.Items)
+                    {
+                        if (name != null)
+                            throw new ApplicationException("Assigment tuples should not be named '='");
 
+                        if (expr is VariableReferenceNode varRef)
+                        {
+                            names.Add(varRef.Name);
+                        }
+                        else
+                        {
+                            if (expr is UnresolvedReferenceNode ur && ur.Parts.Count == 1)
+                                names.Add(ur.Parts[0]);
+                            else
+                                throw new InvalidOperationException("Invalid token in tuple assignment");
+                        }
+                    }
+
+                    var rhs = Right.Evaluate(context);
+                    context.DeconstructAssign(names.ToArray(), rhs);
+                    return rhs;
+                }
                 if (Op == OperatorToken.Equals && Left is VariableReferenceNode lv)
                 {
                     if (!context.HasVariable(lv.Name) && context.HasVariable("this") && context.Get("this").Type == Ast.ValueType.Struct)
@@ -4955,14 +6069,14 @@
                         context.StoreStringVariable(lv.Name, strVal);
                         return strVal;
                     }
-                    if(lvInfo.Type == ValueType.Char)
+                    if (lvInfo.Type == ValueType.Char)
                     {
                         var rhs = Right.Evaluate(context);
-                        if(!MatchVariableType(rhs, lvInfo.Type)) throw new ApplicationException($"Type missmatch during char assignment: {rhs.GetType()}");
+                        if (!MatchVariableType(rhs, lvInfo.Type)) throw new ApplicationException($"Type missmatch during char assignment: {rhs.GetType()}");
                         context.WriteVariable(lv.Name, Convert.ToChar(rhs));
                         return Convert.ToChar(rhs);
                     }
-                    if(lvInfo.Type == ValueType.Nullable)
+                    if (lvInfo.Type == ValueType.Nullable)
                     {
                         int oldPtr = (int)context.ReadVariable(lv.Name);
                         if (oldPtr >= context.StackSize && context.IsUsed(oldPtr)) context.Free(oldPtr);
@@ -4972,7 +6086,7 @@
                             context.WriteVariable(lv.Name, -1);
                             return null!;
                         }
-                        if(oldPtr<0) context.WriteVariable(lv.Name, context.PackReference(rhs, ValueType.Nullable));
+                        if (oldPtr < 0) context.WriteVariable(lv.Name, context.PackReference(rhs, ValueType.Nullable));
                         else
                         {
                             var baseType = (ValueType)context.RawMemory[oldPtr];
@@ -5001,7 +6115,7 @@
 
                                 if (Ast.IsReferenceType(et))
                                 {
-                                    int p = context.Malloc(sizeof(int) * items.Length, et);
+                                    int p = context.Malloc(sizeof(int) * items.Length, et, isArray: true);
                                     for (int i = 0; i < items.Length; i++)
                                     {
                                         int h = context.PackReference(items[i], et);
@@ -5011,7 +6125,7 @@
                                 }
                                 else
                                 {
-                                    int p = context.Malloc(elemSize * items.Length, et);
+                                    int p = context.Malloc(elemSize * items.Length, et, isArray: true);
                                     for (int i = 0; i < items.Length; i++)
                                         context.GetSourceBytes(et, items[i]).CopyTo(context.RawMemory.AsSpan(p + i * elemSize, elemSize));
                                     newPtr = p;
@@ -5026,7 +6140,7 @@
                                 newPtr = int.Parse(ptr);
                                 break;
                             default:
-                                throw new ApplicationException("Unsupported value on right side of array assignment: "+rhs.GetType());
+                                throw new ApplicationException("Unsupported value on right side of array assignment: " + rhs.GetType());
 
                         }
                         context.WriteVariable(lv.Name, newPtr);
@@ -5048,7 +6162,7 @@
                     context.StoreStringVariable(lvs.Name, combined);
                     return combined;
                 }
-                
+
                 var l = Left.Evaluate(context);
                 var r = Right.Evaluate(context);
                 if ((Op is OperatorToken.Equal or OperatorToken.NotEqual))
@@ -5070,7 +6184,7 @@
                     }
                 }
 
-                
+
                 object result;
                 if ((Op == OperatorToken.Plus || Op == OperatorToken.PlusEqual) && (l is string || r is string))
                 {
@@ -5110,26 +6224,25 @@
                 }
                 else if (Left is UnaryOpNode un && un.Op == OperatorToken.Multiply && Op == OperatorToken.Equals)
                 {
-                    int addr = un.Operand is VariableReferenceNode pvr 
-                        ? Convert.ToInt32(context.ReadVariable(pvr.Name)) 
+                    int addr = un.Operand is VariableReferenceNode pvr
+                        ? Convert.ToInt32(context.ReadVariable(pvr.Name))
                         : Convert.ToInt32(un.Operand.Evaluate(context));
-                    var target = context.GetVariableByAddress(addr) 
+                    var target = context.GetVariableByAddress(addr)
                         ?? throw new InvalidOperationException("Pointer points to invalid stack memory");
                     object rhs = Right.Evaluate(context);
                     if (!MatchVariableType(rhs, target.Type)) rhs = context.Cast(rhs, (Ast.ValueType)target.Type);
                     context.WriteVariableById(addr, target.Type, rhs);
                     return rhs;
                 }
-                else if (Op == OperatorToken.Equals && Left is UnresolvedReferenceNode ur && ur.Parts.Count == 2)
+                else if (IsAssignmentOp(Op) && Left is UnresolvedReferenceNode ur && ur.Parts.Count == 2)
                 {
                     string varName = ur.Parts[0];
                     string field = ur.Parts[1];
                     var info = context.Get(varName);
                     if (info.Type != ValueType.Struct) throw new ApplicationException($"{varName} is not a struct");
                     int instPtr = Convert.ToInt32(context.ReadVariable(varName));
-                    object rhs = Right.Evaluate(context);
-                    context.WriteStructField(instPtr, field, rhs);
-                    return rhs;
+                    context.WriteStructField(instPtr, field, result);
+                    return result;
                 }
                 else if (IsAssignmentOp(Op))
                 {
@@ -5167,10 +6280,10 @@
                 if (lCode == TypeCode.DateTime || rCode == TypeCode.DateTime)
                 {
                     var ld = Convert.ToDateTime(l); var rd = Convert.ToDateTime(r);
-                    return op switch 
-                    { 
-                        OperatorToken.Minus => ld - rd, 
-                        OperatorToken.MinusEqual => ld - rd, 
+                    return op switch
+                    {
+                        OperatorToken.Minus => ld - rd,
+                        OperatorToken.MinusEqual => ld - rd,
                         OperatorToken.Equal => ld == rd,
                         OperatorToken.GreaterOrEqual => ld >= rd,
                         OperatorToken.LessOrEqual => ld <= rd,
@@ -5187,13 +6300,15 @@
                     case TypeCode.UInt16:
                     case TypeCode.UInt32:
                     case TypeCode.UInt64: unsigned = true; break;
-                    default: switch (rCode)
+                    default:
+                        switch (rCode)
                         {
                             case TypeCode.Byte:
                             case TypeCode.UInt16:
                             case TypeCode.UInt32:
                             case TypeCode.UInt64: unsigned = true; break;
-                        } break;
+                        }
+                        break;
                 }
                 if (unsigned)
                 {
@@ -5331,7 +6446,6 @@
             }
         }
         #endregion
-        #region Values nodes
         #region Variable nodes
         public class VariableDeclarationNode : AstNode
         {
@@ -5343,7 +6457,9 @@
             public bool IsConst { get; }
             public bool IsPublic { get; }
             public ValueType InnerType { get; }
-            public VariableDeclarationNode(ValueType type, string name, AstNode expression, bool isArray = false, 
+            public string? CustomTypeName { get; init; }
+            public GenericUse? Generic { get; init; }
+            public VariableDeclarationNode(ValueType type, string name, AstNode expression, bool isArray = false,
                 int?[]? arrayLength = null, bool isConst = false, bool isPublic = false, ValueType? innerType = null)
             {
                 Type = type;
@@ -5360,15 +6476,55 @@
             {
                 context.Check();
                 var value = Expression.Evaluate(context);
-                if (Type == ValueType.Object && value is int pointer && context.GetHeapObjectType(pointer) == ValueType.Struct)
+                if(Type == ValueType.Object && value is int pointer && pointer >= context.StackSize && pointer < context.StackSize + context.MemoryUsed)
                 {
-                    context.Declare(Name, ValueType.Struct, value);
-                    return null!;
+                    if (context.GetHeapObjectType(pointer) == ValueType.Struct)
+                    {
+                        context.Declare(Name, ValueType.Struct, value);
+                        return null!;
+                    }
+                    if(context.GetHeapObjectType(pointer) == ValueType.Tuple)
+                    {
+                        context.Declare(Name, ValueType.Tuple, value);
+                        return null!;
+                    }
                 }
                 if (Type == ValueType.Nullable && InnerType != Type && value is not null) value = context.Cast(value, InnerType);
                 if (IsArray)
                 {
-                    if (value is ValueTuple<object?[], ValueType> arr)
+                    if (value is ValueTuple<object?[], ValueType, int[]> arr3)//with pins
+                    {
+                        var vals = arr3.Item1;
+                        var elemT = arr3.Item2 == ValueType.Object ? Type : arr3.Item2;
+                        var pins = arr3.Item3;
+
+                        if (elemT != Type) throw new ApplicationException("Type missmatch during declaration");
+
+                        int elemSize = context.GetTypeSize(elemT);
+                        int basePtr;
+
+                        if (Ast.IsReferenceType(elemT))
+                        {
+                            basePtr = context.Malloc(sizeof(int) * vals.Length, elemT, isArray: true);
+                            for (int i = 0; i < vals.Length; i++)
+                            {
+                                int h = context.PackReference(vals[i]!, elemT);
+                                BitConverter.GetBytes(h).CopyTo(context.RawMemory, basePtr + i * sizeof(int));
+                            }
+                        }
+                        else
+                        {
+                            basePtr = context.Malloc(elemSize * vals.Length, elemT, isArray: true);
+                            for (int i = 0; i < vals.Length; i++)
+                                context.GetSourceBytes(elemT, vals[i]).CopyTo(context.RawMemory.AsSpan(basePtr + i * elemSize, elemSize));
+                        }
+
+                        foreach (var k in pins) if (k != -1) context.Unpin(k);
+
+                        context.Declare(Name, ValueType.Array, basePtr);
+                        return null!;
+                    }
+                    else if (value is ValueTuple<object?[], ValueType> arr)
                     {
                         object?[] vals = arr.Item1;
                         ValueType elemT = arr.Item2 == ValueType.Object ? Type : arr.Item2;
@@ -5378,7 +6534,8 @@
                         int basePtr;
                         if (Ast.IsReferenceType(elemT))
                         {
-                            basePtr = context.Malloc(sizeof(int) * vals.Length, elemT);
+                            basePtr = context.Malloc(sizeof(int) * vals.Length, elemT, isArray: true);
+
                             for (int i = 0; i < vals.Length; i++)
                             {
                                 int packed = context.PackReference(vals[i]!, elemT);
@@ -5388,7 +6545,7 @@
                         else
                         {
                             int bytes = elemSize * vals.Length;
-                            basePtr = context.Malloc(bytes, elemT);
+                            basePtr = context.Malloc(bytes, elemT, isArray: true);
                             for (int i = 0; i < vals.Length; i++)
                             {
                                 ReadOnlySpan<byte> src = context.GetSourceBytes(elemT, vals[i]);
@@ -5420,7 +6577,7 @@
                         if (len * context.GetTypeSize(Type) >= context.RawMemory.Length - context.StackSize) throw new OutOfMemoryException();
                         context.Declare(Name, ValueType.Array, (len, Type));
                     }
-                    else context.Declare(Name, ValueType.Array, null); 
+                    else context.Declare(Name, ValueType.Array, null);
                 }
                 else context.Declare(Name, Type, value);
                 return null!;
@@ -5447,7 +6604,7 @@
                 if (!context.HasVariable(resolved))
                 {
                     string ns = context.CurrentNameSpace ?? string.Empty;
-                    
+
                     while (ns.Length > 0)
                     {
                         string candidate = $"{ns}.{Name}";
@@ -5465,7 +6622,7 @@
                         if (context.HasVariable(candidate)) { resolved = candidate; break; }
                     }
                 }
-                leave:
+            leave:
                 if (!context.HasVariable(resolved) && context.HasVariable("this") && context.Get("this").Type == Ast.ValueType.Struct)
                 {
                     int instPtr = Convert.ToInt32(context.ReadVariable("this"));
@@ -5498,6 +6655,7 @@
                         return context.ReadFromMemorySlice(context.RawMemory[(ptr + 1)..(ptr + 1 + size)], baseType);
                     }
                     if (v.Type == ValueType.Array) return ptr;
+                    if (v.Type == ValueType.Tuple) return ptr;
                     if (v.Type == ValueType.Struct) return ptr;
                     if (v.Type == ValueType.Object) return BitConverter.ToInt32(context.GetSpan(ptr));
                     throw new ApplicationException($"Reading object: {v.Type}");
@@ -5537,7 +6695,7 @@
             public override void Print(string indent = "", bool last = true)
             {
                 Console.WriteLine($"{indent}└── new {ElementType.ToString().ToLower()}[ ]");
-                foreach(var len in LengthExprs)
+                foreach (var len in LengthExprs)
                     len.Print(indent + (last ? "    " : "│   "), true);
             }
         }
@@ -5546,46 +6704,60 @@
             public AstNode ArrayExpr { get; }
             public AstNode IndexExpr { get; }
             public bool FromEnd { get; }
-            public ArrayIndexNode(AstNode arrayExpr, AstNode indexExpr, bool fromEnd = false)
+            public bool IsNullConditional { get; }
+            public ArrayIndexNode(AstNode arrayExpr, AstNode indexExpr, bool fromEnd = false, bool isNullConditional = false)
             {
                 ArrayExpr = arrayExpr;
                 IndexExpr = indexExpr;
                 FromEnd = fromEnd;
+                IsNullConditional = isNullConditional;
             }
             public override object Evaluate(ExecutionContext context)
             {
                 context.Check();
                 object arr = ArrayExpr.Evaluate(context);
+                if (arr is null)
+                {
+                    if (IsNullConditional) return null!;
+                    throw new ApplicationException("Null reference in array index");
+                }
                 if (arr is string s)
                 {
                     int idx = Convert.ToInt32(IndexExpr.Evaluate(context));
                     if (FromEnd) idx = s.Length - idx;
                     if (idx < 0 || idx >= s.Length)
-                        throw new IndexOutOfRangeException($"index {idx} length {s.Length}");
-                    return s[idx]; // char
+                        throw new IndexOutOfRangeException($"Index out of range: index {idx} length {s.Length}");
+                    return s[idx];
                 }
 
                 int basePtr = Convert.ToInt32(arr);
                 int i = Convert.ToInt32(IndexExpr.Evaluate(context));
-                if(FromEnd) i = context.GetArrayLength(basePtr) - i;
+                if (FromEnd) i = context.GetArrayLength(basePtr) - i;
                 int addr = ElementAddress(context, basePtr, i, out var vt);
                 if (IsReferenceType(vt))
                 {
                     int handle = BitConverter.ToInt32(context.RawMemory, addr);
-                    
+
                     return vt switch
                     {
                         ValueType.String => handle < 0 ? handle : context.ReadHeapString(handle),
-                        ValueType.Array => handle,
                         ValueType.Object => handle,
-                        _ => handle 
+                        _ => handle
                     };
                 }
                 else return context.ReadFromStack(addr, vt);
             }
             public void Write(ExecutionContext context, object value)
             {
-                int basePtr = Convert.ToInt32(ArrayExpr.Evaluate(context));
+                object arr = ArrayExpr.Evaluate(context);
+
+                if (arr is null)
+                {
+                    if (IsNullConditional) return;
+                    throw new ApplicationException("Null reference on indexed assignment");
+                }
+
+                int basePtr = Convert.ToInt32(arr);
                 int idx = Convert.ToInt32(IndexExpr.Evaluate(context));
                 int addr = ElementAddress(context, basePtr, idx, out var vt);
                 if (value is ValueTuple<int, ValueType>)
@@ -5596,17 +6768,19 @@
                 }
                 if (!MatchVariableType(value, vt))
                     value = context.Cast(value, vt);
-
-                if (ExecutionContext.InferType(value) != context.GetHeapObjectType(basePtr)) 
+                var incoming = ExecutionContext.InferType(value);
+                if (incoming == ValueType.Int && vt == ValueType.Struct && value is int p && context.GetHeapObjectType(p) == ValueType.Struct)
+                    incoming = ValueType.Struct;
+                if (incoming != context.GetHeapObjectType(basePtr))
                     throw new ApplicationException($"Type missmatch during indexing: {context.GetHeapObjectType(basePtr)} -> {ExecutionContext.InferType(value)}");
-                
-                if (Ast.IsReferenceType(vt)) 
-                { 
-                    int handle = context.PackReference(value, vt); 
-                    BitConverter.GetBytes(handle).CopyTo(context.RawMemory, addr); 
-                    return; 
+
+                if (Ast.IsReferenceType(vt))
+                {
+                    int handle = context.PackReference(value, vt);
+                    BitConverter.GetBytes(handle).CopyTo(context.RawMemory, addr);
+                    return;
                 }
-                
+
                 ReadOnlySpan<byte> src = context.GetSourceBytes(value);
                 context.ValidateAddress(addr, src.Length);
                 src.CopyTo(context.RawMemory.AsSpan(addr, src.Length));
@@ -5624,7 +6798,7 @@
             }
             public override void Print(string indent = "", bool isLast = true)
             {
-                Console.WriteLine($"{indent}└── index");
+                Console.WriteLine($"{indent}└── index{(IsNullConditional ? "?" : "")}");
                 string ci = indent + (isLast ? "    " : "│   ");
                 ArrayExpr.Print(ci, false);
                 IndexExpr.Print(ci, true);
@@ -5645,10 +6819,33 @@
             {
                 context.Check();
 
-                object?[] values = Items.Select(i => i.Evaluate(context)).ToArray();
+                var values = new object?[Items.Length];
+                if (Ast.IsReferenceType(ElementType))
+                {
+                    var pins = new int[Items.Length];
+                    for (int i = 0; i < Items.Length; i++)
+                    {
+                        var v = Items[i].Evaluate(context);
+                        if (v is int addr && addr >= context.StackSize)
+                            pins[i] = context.Pin(addr);
+                        else
+                            pins[i] = -1;
 
-                //ValueTuple<object?[], Ast.ValueType>
-                return (values, ElementType);
+                        values[i] = v;
+                    }
+
+                    return (values, ElementType, pins);
+                }
+                else
+                {
+                    for (int i = 0; i < Items.Length; i++)
+                    {
+                        values[i] = Items[i].Evaluate(context);
+                    }
+
+                    return (values, ElementType);
+                }
+
             }
 
             public override void Print(string ind = "", bool last = true)
@@ -5659,8 +6856,41 @@
                     i.Print(child, n == Items.Length - 1);
             }
         }
+        public sealed class TupleLiteralNode : AstNode
+        {
+            public readonly (string? name, AstNode expr)[] Items;
+            public TupleLiteralNode((string? name, AstNode expr)[] items) => Items = items;
 
-        #endregion
+            public override object Evaluate(ExecutionContext context)
+            {
+                var slots = new List<(ValueType t, object? v, int namePtr)>(Items.Length);
+
+                foreach (var (name, ex) in Items)
+                {
+                    context.Check();
+                    object? val = ex.Evaluate(context);
+                    ValueType et;
+                    if (val is null) et = ValueType.Object;
+                    else if (val is string) et = ValueType.String;
+                    else if (val is int p && p >= context.StackSize) et = context.GetHeapObjectType(p);
+                    else et = ExecutionContext.InferType(val);
+
+                    int namePtr = name is null ? -1 : context.PackReference(name, ValueType.String);
+
+                    slots.Add((et, val, namePtr));
+                }
+
+                return context.AllocateTuple(slots);
+            }
+            public override void Print(string indent = "", bool isLast = true)
+            {
+                Console.WriteLine($"{indent}└── tuple");
+                string ci = indent + (isLast ? "    " : "│   ");
+                for (int i = 0; i < Items.Length; i++)
+                    Items[i].expr.Print(ci, i == Items.Length - 1);
+
+            }
+        }
         public class LiteralNode : AstNode
         {
             public object? Value { get; }
@@ -5670,7 +6900,7 @@
             public override object Evaluate(ExecutionContext context)
             {
                 context.Check();
-                return Value;
+                return Value!;
             }
             public override void Print(string indent = "", bool isLast = true)
             {
@@ -5700,6 +6930,16 @@
                 Expr.Print(child, true);
             }
         }
+        
+        public sealed class TupleTargetNode : AstNode
+        {
+            public readonly string[] Names;
+            public TupleTargetNode(IEnumerable<string> names) => Names = names.ToArray();
+            public override object Evaluate(ExecutionContext ctx) =>
+                throw new InvalidOperationException("TupleTargetNode must not be evaluated directly");
+            public override void Print(string ind = "", bool last = true)
+                => Console.WriteLine($"{ind}└── tuple-target ({string.Join(", ", Names)})");
+        }
 
         #endregion
 
@@ -5723,7 +6963,8 @@
                     context.Check();
                     context.EnterScope();
                     try
-                    {;
+                    {
+                        ;
                         var cond = Condition.Evaluate(context);
                         if (!(cond is bool bb && bb)) break;
 
@@ -5738,7 +6979,7 @@
                     finally { context.ExitScope(); }
                 }
 
-                return null;
+                return null!;
             }
 
             public override void Print(string indent = "", bool isLast = true)
@@ -5777,7 +7018,7 @@
                 }
                 while (Condition.Evaluate(context) is bool b && b);
 
-                return null;
+                return null!;
             }
 
             public override void Print(string indent = "", bool isLast = true)
@@ -5811,10 +7052,10 @@
                     Init?.Evaluate(context);
                     while (true)
                     {
-                        
-                            context.Check();
-                            var cond = Condition?.Evaluate(context);
-                            if (cond is bool b && !b) break;
+
+                        context.Check();
+                        var cond = Condition?.Evaluate(context);
+                        if (cond is bool b && !b) break;
                         context.EnterScope();
                         try
                         {
@@ -5823,17 +7064,17 @@
                             if (res is ContinueSignal) { Step?.Evaluate(context); continue; }
                             if (res is ReturnSignal) return res;
                         }
-                        finally 
-                        { 
-                            context.ExitScope(); 
+                        finally
+                        {
+                            context.ExitScope();
                         }
                         Step?.Evaluate(context);
-                        
+
                     }
                 }
                 finally { context.ExitScope(); }
 
-                return null;
+                return null!;
             }
 
             public override void Print(string indent = "", bool isLast = true)
@@ -6154,7 +7395,7 @@
             public override object Evaluate(ExecutionContext context)
             {
                 var val = Expression?.Evaluate(context);
-                
+
                 int pinKey = context.Pin(val);
                 return new ReturnSignal(val, pinKey);
             }
@@ -6301,7 +7542,7 @@
                 }
                 if (ns.Length < 200 && context.Usings.Count < 200) context.Usings.Add(ns);
                 else throw new ApplicationException("using directive is too large");
-                    return null!;
+                return null!;
             }
 
             public override void Print(string indent = "", bool l = true) =>
@@ -6324,7 +7565,7 @@
                 ctx.CurrentNameSpace = string.IsNullOrEmpty(buff) ? FullName : $"{buff}.{FullName}";
                 foreach (var m in Members) m.Evaluate(ctx);
                 ctx.CurrentNameSpace = buff;
-                return null;
+                return null!;
             }
 
             public override void Print(string indent = "", bool last = true)
@@ -6338,30 +7579,55 @@
         public class UnresolvedReferenceNode : AstNode
         {
             public List<string> Parts { get; }
-            public UnresolvedReferenceNode(List<string> parts) { Parts = parts;  }
+            public bool IsNullConditional { get; }
+            public UnresolvedReferenceNode(List<string> parts, bool isNullConditional = false) { Parts = parts; IsNullConditional = isNullConditional; }
             public override object Evaluate(ExecutionContext context)
             {
                 if (Parts.Count >= 2)
                 {
                     string varName = Parts[0];
-                    for(int i = 1; i<Parts.Count-1; i++)
+                    for (int i = 1; i < Parts.Count - 1; i++)
                     {
                         varName += $".{Parts[i]}";
                     }
                     if (context.HasVariable(varName))
                     {
-                        string member = Parts[Parts.Count-1];
-                        object target = context.ReadVariable(varName);
+                        string member = Parts[Parts.Count - 1];
+                        var info = context.Get(varName);
+                        if (IsNullConditional && IsReferenceType(info.Type) && Convert.ToInt32(context.ReadVariable(varName)) <= 0)
+                        {
+                            return null!;
+                        }
                         if (context.NativeFunctions.ContainsKey(member))
                         {
                             var call = new CallNode(member, new AstNode[] { new VariableReferenceNode(varName) });
                             return call.Evaluate(context);
                         }
-                        if (context.Get(varName).Type == ValueType.Struct)
+                        object target = context.ReadVariable(varName);
+                        if (info.Type == ValueType.Struct)
                         {
                             int ptr = Convert.ToInt32(target);
                             int off = context.GetStructFieldOffset(ptr, member, out var vt) + 1;
                             return IsReferenceType(vt) ? context.DerefReference(ptr + off, vt)! : context.ReadFromStack(ptr + off, vt);
+                        }
+                        if(info.Type == ValueType.Tuple)
+                        {
+                            var items = context.ReadTuple(Convert.ToInt32(target));
+                            if (member.Length >= 5 && member.StartsWith("Item") 
+                                && int.TryParse(member.AsSpan(4), out int idx) && idx >= 1 && idx <= items.Count)
+                            {
+                                return items[idx - 1].value!;
+                            }
+                            for (int i = 0; i < items.Count; i++)
+                            {
+                                if (items[i].namePtr >= context.StackSize)
+                                {
+                                    string name = context.ReadHeapString(items[i].namePtr);
+                                    if (string.Equals(name, member))
+                                        return items[i].value!;
+                                }
+                            }
+                            throw new ApplicationException($"Tuple '{varName}' has no member '{member}'");
                         }
                         throw new ApplicationException($"No native function '{member}' for variable '{varName}' found");
 
@@ -6388,11 +7654,13 @@
                 Console.WriteLine($"{indent}└── unresolved {string.Join('.', Parts)}");
             }
 
-            
+
         }
         #endregion
 
         #region Function nodes
+        public sealed record GenericInfo(string[] TypeParameters, Dictionary<string, string[]>? Constraints);
+        public sealed record GenericUse(string[] TypeArguments);
         public sealed record AttributeNode(string Name, string[] Args);
         public class FunctionDeclarationNode : Ast.AstNode
         {
@@ -6402,13 +7670,17 @@
             public ValueType[] ParamTypes;
             public AstNode?[] DefaultValues;
             public Ast.AstNode Body;
+            public int ParamsIndex = -1;
+            public GenericInfo? Generics { get; init; }
             public string[] Modifiers { get; }
             public IReadOnlyList<AttributeNode> Attributes { get; }
-            public FunctionDeclarationNode(ValueType? ret, string name, string[] @params, ValueType[] types, AstNode?[] defVals, Ast.AstNode body, 
+            public FunctionDeclarationNode(ValueType? ret, string name, string[] @params, ValueType[] types, AstNode?[] defVals, Ast.AstNode body,
                 IList<string>? mods = null, IList<AttributeNode>? attrs = null)
-            { ReturnType = ret; Name = name; Params = @params; ParamTypes = types; Body = body; DefaultValues = defVals;
-                Modifiers = mods?.ToArray() ?? Array.Empty<string>(); 
-                Attributes = attrs?.ToArray() ?? Array.Empty<AttributeNode>(); }
+            {
+                ReturnType = ret; Name = name; Params = @params; ParamTypes = types; Body = body; DefaultValues = defVals;
+                Modifiers = mods?.ToArray() ?? Array.Empty<string>();
+                Attributes = attrs?.ToArray() ?? Array.Empty<AttributeNode>();
+            }
 
             public override object Evaluate(ExecutionContext context)
             {
@@ -6422,8 +7694,10 @@
                     DefaultValues = this.DefaultValues,
                     Attributes = this.Attributes.ToArray(),
                     IsPublic = Modifiers.Contains("public"),
+                    Generics = this.Generics,
+                    ParamsIndex = this.ParamsIndex,
                 });
-                return null;
+                return null!;
             }
             public override void Print(string indent = "", bool isLast = true)
             {
@@ -6439,6 +7713,8 @@
         {
             public string Name;
             public AstNode[] Args;
+            public GenericUse? Generic { get; init; }
+            public bool IsNullConditional { get; init; }
             public CallNode(string name, AstNode[] args) { Name = name; Args = args; }
             public override object Evaluate(ExecutionContext ctx)
             {
@@ -6451,6 +7727,10 @@
 
                     if (ctx.HasVariable(objName))
                     {
+                        if (IsNullConditional && (new VariableReferenceNode(objName).Evaluate(ctx)) is null)
+                        {
+                            return null!;
+                        }
                         var newArgs = new AstNode[Args.Length + 1];
                         newArgs[0] = new VariableReferenceNode(objName);
                         Array.Copy(Args, 0, newArgs, 1, Args.Length);
@@ -6506,31 +7786,36 @@
                             }
                             return ret!;
                         }
-                        catch (Exception ex) 
-                        { 
-                            inFuncException = FormatExceptionForUser(ex, frameLimit: 2, innerLimit: 1); 
-                            if (ex is OperationCanceledException or OutOfMemoryException or StackOverflowException) throw; 
+                        catch (Exception ex)
+                        {
+                            inFuncException = FormatExceptionForUser(ex, frameLimit: 2, innerLimit: 1);
+                            if (ex is OperationCanceledException or OutOfMemoryException or StackOverflowException) throw;
                         }
                         finally { ctx.ExitFunction(); }
                     }
-                    throw new ApplicationException( (inFuncException is null ? $"No native overload '{Name}' matches given arguments " +
+                    throw new ApplicationException((inFuncException is null ? $"No native overload '{Name}' matches given arguments " +
                         $"({string.Join(", ", argVals.Select(x => x?.GetType()?.ToString() ?? "null"))})" : $"Exception in {Name}\n{inFuncException}"));
                 }
-                
+
                 if (!TryResolve(Name, ctx, out string qName, out var overloads2))
                     throw new ApplicationException($"Function '{Name}' not defined");
                 Name = qName;
 
-                var argVals2 = Args.Select(a => a.Evaluate(ctx)).ToArray();
+                var callArgs = Args.Select(a => a.Evaluate(ctx)).ToArray();
                 var candidates = overloads2!.Where(f =>
                 {
                     int required = Enumerable.Range(0, f.ParamNames.Length).Count(i => f.DefaultValues[i] is null);
-                    return argVals2.Length >= required && argVals2.Length <= f.ParamNames.Length;
+                    bool hasParams = f.ParamsIndex >= 0;
+                    if (hasParams)
+                        return callArgs.Length >= required && callArgs.Length >= f.ParamsIndex;
+                    else
+                        return callArgs.Length >= required && callArgs.Length <= f.ParamNames.Length;
                 }).ToList();
                 int BestScore(ReadOnlySpan<object?> args, ExecutionContext.Function f)
                 {
                     int score = 0;
-                    for (int i = 0; i < args.Length; i++)
+                    int limit = (f.ParamsIndex >= 0) ? Math.Min(f.ParamsIndex, args.Length) : Math.Min(f.ParamTypes.Length, args.Length);
+                    for (int i = 0; i < limit; i++)
                     {
                         var need = f.ParamTypes[i];
                         var have = args[i];
@@ -6540,9 +7825,10 @@
                         else if (have is IConvertible) score += 0;
                         else return -1;
                     }
+                    if (f.ParamsIndex < 0 && args.Length == f.ParamTypes.Length) score += 1;
                     return score;
                 }
-                var best = candidates.Select(f => (fn: f, score: BestScore(argVals2, f))).Where(t => t.score >= 0)
+                var best = candidates.Select(f => (fn: f, score: BestScore(callArgs, f))).Where(t => t.score >= 0)
                     .OrderByDescending(t => t.score).FirstOrDefault();
                 var fn = best.fn;
                 string fnNs = Name.Contains('.') ? Name.Substring(0, Name.LastIndexOf('.')) : "";
@@ -6553,22 +7839,114 @@
                 ctx.EnterScope();
                 try
                 {
+                    var effectiveParamTypes = (Ast.ValueType[])fn.ParamTypes.Clone();
+                    if (fn.Generics is { } gi)
+                    {
+                        if (Generic is { } use && use.TypeArguments.Length > 0)
+                        {
+                            var argTypes = new List<Ast.ValueType>(use.TypeArguments.Length);
+                            foreach (var raw in use.TypeArguments)
+                            {
+                                ctx.Check();
+                                var name = raw.Trim();
+                                if (!Enum.TryParse<Ast.ValueType>(name, ignoreCase: true, out var vt))
+                                    throw new ApplicationException($"Unknown type name '{name}' in generic arguments.");
+                                argTypes.Add(vt);
+                            }
+                            int expected = gi.TypeParameters?.Length ?? 0;
+                            if (argTypes.Count != expected)
+                                throw new ApplicationException($"Generic argument count mismatch: given {argTypes.Count}, expected {expected}.");
+                            if (argTypes.Count == 1)
+                            {
+                                for (int i = 0; i < effectiveParamTypes.Length; i++)
+                                    if (effectiveParamTypes[i] == Ast.ValueType.Object)
+                                        effectiveParamTypes[i] = argTypes[0];
+                            }
+                            else
+                            {
+                                int idx = 0;
+                                for (int i = 0; i < effectiveParamTypes.Length && idx < argTypes.Count; i++)
+                                    if (effectiveParamTypes[i] == Ast.ValueType.Object)
+                                        effectiveParamTypes[i] = argTypes[idx++];
+                            }
+
+                            CheckGenericConstraints(ctx, fn, effectiveParamTypes);
+                        }
+                        else
+                        {
+                            int want = gi.TypeParameters?.Length ?? 0;
+                            int taken = 0;
+                            for (int i = 0; i < effectiveParamTypes.Length && i < callArgs.Length; i++)
+                            {
+                                ctx.Check();
+                                if (effectiveParamTypes[i] == Ast.ValueType.Object)
+                                {
+                                    var inferred = ExecutionContext.InferType(callArgs[i]!);
+                                    if (inferred != Ast.ValueType.Object)
+                                    {
+                                        effectiveParamTypes[i] = inferred;
+                                        if (want > 0 && ++taken >= want) break;
+                                    }
+                                }
+                            }
+                            CheckGenericConstraints(ctx, fn, effectiveParamTypes);
+                        }
+                    }
                     for (int i = 0; i < fn.ParamNames.Length; i++)
                     {
+                        if (fn.ParamsIndex >= 0 && i == fn.ParamsIndex)
+                        {
+                            if (callArgs.Length == fn.ParamNames.Length && callArgs[i] is int ptr && ptr >= ctx.StackSize && ptr < ctx.StackSize + ctx.MemoryUsed)
+                            {
+                                ctx.Declare(fn.ParamNames[i], Ast.ValueType.Array, callArgs[i]);
+                            }
+                            else
+                            {
+                                int start = i;
+                                int count = Math.Max(0, callArgs.Length - start);
+                                object?[] tail = new object?[count];
+                                for (int k = 0; k < count; k++) tail[k] = callArgs[start + k];
+                                Ast.ValueType PickElemType(object?[] items)
+                                {
+                                    Ast.ValueType et = Ast.ValueType.Object;
+                                    foreach (var it in items)
+                                    {
+                                        if (it is null) continue;
+                                        var t = ExecutionContext.InferType(it);
+                                        if (et == Ast.ValueType.Object) et = t;
+                                        else if (et != t)
+                                        {
+                                            if (IsNumeric(et) && IsNumeric(t)) { et = Ast.ValueType.Double; continue; }
+                                            et = Ast.ValueType.Object; break;
+                                        }
+                                    }
+                                    return et;
+                                }
+
+                                var elemType = PickElemType(tail);
+                                ctx.Declare(fn.ParamNames[i], Ast.ValueType.Array, (tail, elemType));
+                            }
+                            break;
+                        }
                         object? val;
-                        if (i < Args.Length) val = Args[i].Evaluate(ctx);
+                        if (i < callArgs.Length) val = callArgs[i];
                         else
                         {
                             var defExpr = fn.DefaultValues[i];
-                            if (defExpr is null) throw new ApplicationException($"Parameter '{fn.ParamNames[i]}' is required");
+                            if (defExpr is null)
+                                throw new ApplicationException($"Parameter '{fn.ParamNames[i]}' is required");
                             val = defExpr.Evaluate(ctx);
                         }
-                        if (!MatchVariableType(val, fn.ParamTypes[i]) && fn.ParamTypes[i] != ValueType.Object)
+
+                        var needType = effectiveParamTypes[i];
+
+                        if (!MatchVariableType(val!, needType) && needType != Ast.ValueType.Object)
                         {
-                            try { val = ctx.Cast(val, fn.ParamTypes[i]); }
-                            catch { throw new ApplicationException($"Cannot cast {val?.GetType().Name} to {fn.ParamTypes[i]}"); }
+                            try { val = ctx.Cast(val!, needType); }
+                            catch { throw new ApplicationException($"Cannot cast {val?.GetType().Name} to {needType}"); }
                         }
-                        ctx.Declare(fn.ParamNames[i], fn.ParamTypes[i], val);
+
+                        ctx.Declare(fn.ParamNames[i], needType, val);
                     }
                     var ret = fn.Body.Evaluate(ctx);
                     var result = ret is ReturnSignal rs ? rs.Value : null;
@@ -6576,7 +7954,7 @@
                     {
                         if (!MatchVariableType(result, declared))
                             result = ctx.Cast(result, declared);
-                        
+
                     }
                     ctx.ExitScope();
                     if (ret is ReturnSignal rsignal && rsignal.PinKey != -1)
@@ -6611,15 +7989,52 @@
                 {
                     string candidate = $"{u}.{simpleName}";
                     if (ctx.Functions.TryGetValue(candidate, out overloads))
-                    { 
-                        qualified = candidate; 
-                        return true; 
+                    {
+                        qualified = candidate;
+                        return true;
                     }
                 }
                 qualified = string.Empty;
                 overloads = null;
                 return false;
 
+            }
+            static bool IsNumeric(Ast.ValueType t) => t is Ast.ValueType.Byte or Ast.ValueType.Sbyte
+            or Ast.ValueType.Short or Ast.ValueType.UShort
+            or Ast.ValueType.Int or Ast.ValueType.Uint
+            or Ast.ValueType.Long or Ast.ValueType.Ulong
+            or Ast.ValueType.Float or Ast.ValueType.Double or Ast.ValueType.Decimal;
+            void CheckGenericConstraints(ExecutionContext ctx, ExecutionContext.Function fn, Ast.ValueType[] effectiveParamTypes)
+            {
+                if (fn.Generics?.Constraints is null) return;
+
+                var gi = fn.Generics;
+                var map = new Dictionary<string, Ast.ValueType>(StringComparer.Ordinal);
+
+                int idx = 0;
+                for (int i = 0; i < fn.ParamTypes.Length && idx < gi.TypeParameters.Length; i++)
+                    if (fn.ParamTypes[i] == Ast.ValueType.Object)
+                        map[gi.TypeParameters[idx++]] = effectiveParamTypes[i];
+
+                foreach (var kv in gi.Constraints)
+                {
+                    var tpName = kv.Key;
+                    if (!map.TryGetValue(tpName, out var bound))
+                        continue;
+
+                    foreach (var raw in kv.Value)
+                    {
+                        ctx.Check();
+                        var s = raw.Trim().ToLowerInvariant();
+                        bool ok =
+                            s == "numeric" ? IsNumeric(bound) :
+                            Enum.TryParse<Ast.ValueType>(raw, true, out var vt) ? vt == bound :
+                            false;
+
+                        if (!ok)
+                            throw new ApplicationException($"Generic constraint failed: '{tpName} : {raw}' does not match actual type '{bound}'.");
+                    }
+                }
             }
             public override void Print(string indent = "", bool isLast = true)
             {
@@ -6665,7 +8080,7 @@
             public string[] Modifiers { get; }
             public EnumDeclarationNode(string name, Member[] members, string[]? modifiers = null)
             {
-                Name = name; 
+                Name = name;
                 Members = members;
                 Modifiers = modifiers ?? Array.Empty<string>();
             }
@@ -6689,7 +8104,7 @@
                     Console.WriteLine($"{childIndent}└── {m}");
             }
         }
-        
+
         public class ConstructorDeclarationNode : Ast.AstNode
         {
             public readonly string StructName;
@@ -6699,11 +8114,11 @@
             public readonly Ast.AstNode Body;
             public readonly string[] Modifiers;
             public readonly Initializer? CtorInitializer;
-
+            public int ParamsIndex = -1;
             public readonly record struct Initializer(string Kind, Ast.AstNode[] Args);
 
-            public ConstructorDeclarationNode(string structName,string[] paramNames,Ast.ValueType[] paramTypes, Ast.AstNode?[] defaultValues, 
-                Ast.AstNode body,IEnumerable<string>? modifiers = null,Initializer? initializer = null)
+            public ConstructorDeclarationNode(string structName, string[] paramNames, Ast.ValueType[] paramTypes, Ast.AstNode?[] defaultValues,
+                Ast.AstNode body, IEnumerable<string>? modifiers = null, Initializer? initializer = null, int paramsIndex = -1)
             {
                 StructName = structName;
                 ParamNames = paramNames;
@@ -6712,6 +8127,7 @@
                 Body = body;
                 Modifiers = (modifiers ?? Array.Empty<string>()).ToArray();
                 CtorInitializer = initializer;
+                ParamsIndex = paramsIndex;
             }
 
             public override object Evaluate(Ast.ExecutionContext context)
@@ -6726,7 +8142,7 @@
                     Body = Body,
                     Attributes = Array.Empty<AttributeNode>(),
                     IsPublic = Modifiers.Contains("public"),
-
+                    ParamsIndex = this.ParamsIndex,
                 };
                 string key = $"__ctor__:{StructName}";
                 context.AddFunction(key, fn);
@@ -6744,6 +8160,7 @@
             public string Name { get; }
             public string[] Modifiers { get; }
             public AstNode[] Members { get; }
+            public GenericInfo? Generics { get; init; }
             public StructDeclarationNode(string name, IEnumerable<string> modifiers, IEnumerable<AstNode> members)
             {
                 Name = name;
@@ -6789,8 +8206,17 @@
                 int ptr = ctx.Malloc(buf.Count, ValueType.Byte);
                 ctx.WriteBytes(ptr, buf.ToArray());
                 ctx.Declare(Name, ValueType.IntPtr, ptr);
+
                 foreach (var ctor in Members.OfType<ConstructorDeclarationNode>())
                     ctor.Evaluate(ctx);
+                foreach (var func in Members.OfType<FunctionDeclarationNode>())
+                {
+                    func.ParamTypes = func.ParamTypes.Prepend(ValueType.Struct).ToArray();
+                    func.Params = func.Params.Prepend("this").ToArray();
+                    func.DefaultValues = func.DefaultValues.Prepend(null).ToArray();
+
+                    func.Evaluate(ctx);
+                }
                 return ptr;
             }
             public override void Print(string indent = "", bool isLast = true)
@@ -6802,10 +8228,11 @@
             }
 
         }
-        public sealed class NewStructNode : Ast.AstNode
+        public class NewStructNode : Ast.AstNode
         {
             private readonly string _structName;
             public Ast.AstNode[] Args { get; }
+            public GenericUse? Generic { get; init; }
             public NewStructNode(string name, params Ast.AstNode[]? args)
             {
                 _structName = name;
@@ -6897,9 +8324,10 @@
                     }
                     if (best.HasValue)
                     {
-                        var ctor = best.Value; 
+                        var ctor = best.Value;
                         context.EnterFunction();
                         context.EnterScope();
+                        int pin = context.Pin(instPtr);
                         try
                         {
                             context.Declare("this", ValueType.Struct, instPtr);
@@ -6915,7 +8343,7 @@
 
                                 context.Declare(ctor.ParamNames[i], ctor.ParamTypes[i], val);
                             }
-                            
+
 
                             _ = ctor.Body.Evaluate(context);
                         }
@@ -6923,15 +8351,16 @@
                         {
                             context.ExitScope();
                             context.ExitFunction();
+                            context.Unpin(pin);
                         }
                     }
                 }
                 return instPtr;
             }
 
-            public override void Print(string indent = "", bool last = true) 
+            public override void Print(string indent = "", bool last = true)
             {
-                Console.WriteLine($"{indent}└── new {_structName}({(Args.Length == 0 ? "" : "...")})"); 
+                Console.WriteLine($"{indent}└── new {_structName}({(Args.Length == 0 ? "" : "...")})");
                 string childIndent = indent + (last ? "    " : "│   ");
                 for (int i = 0; i < Args.Length; i++)
                     Args[i].Print(childIndent, i == Args.Length - 1);
@@ -6942,7 +8371,7 @@
             public string Name { get; }
             public string[] Modifiers { get; }
             public AstNode[] Members { get; }
-
+            public GenericInfo? Generics { get; init; }
             public ClassDeclarationNode(string name, IEnumerable<string> mods, IEnumerable<AstNode> members)
             { Name = name; Modifiers = mods.ToArray(); Members = members.ToArray(); }
 
@@ -6965,11 +8394,11 @@
             public string Name { get; }
             public string[] Modifiers { get; }
             public AstNode[] Members { get; }
-
+            public GenericInfo? Generics { get; init; }
             public InterfaceDeclarationNode(string name, IEnumerable<string> mods, IEnumerable<AstNode> members)
             { Name = name; Modifiers = mods.ToArray(); Members = members.ToArray(); }
 
-            public override object? Evaluate(ExecutionContext ctx) 
+            public override object? Evaluate(ExecutionContext ctx)
             {
                 return null;
             }
@@ -7012,7 +8441,7 @@
         {
             public readonly ValueType Target;
             public TypePatternNode(ValueType t) => Target = t;
-            public override bool Match(object? value, ExecutionContext _) 
+            public override bool Match(object? value, ExecutionContext _)
                 => value != null && MatchVariableType(value, Target);
             public override void Print(string indent = "", bool last = true)
                 => Console.WriteLine($"TypePatternNode {Target}");
