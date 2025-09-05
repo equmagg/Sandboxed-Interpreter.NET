@@ -101,7 +101,7 @@
             "if", "goto", "for", "while", "do", "void","return", "break","continue","try","catch", "switch", "case", "finally" , "var", "default", "throw", "else", "new", "foreach", "in",
             "using", "struct", "class", "checked", "unchecked", "out", "const", "enum", "ref", "private", "public", "protected", "static", "abstract", "interface", "delegate", "as", "base",
             "internal", "unsafe", "sealed", "virtual", "override", "partial", "readonly", "params", "lock", "implicit", "explicit", "fixed", "extern", "operator", "namespace", "event", "is",
-            "and", "or", "not", "async", "await", "volatile", "yield", "record", "where", "nameof" };
+            "and", "or", "not", "async", "await", "volatile", "yield", "record", "where", "nameof", "when", "unmanaged", "notnull" };
             public void ResetCurrent(int pos, Ast.TokenType token, string text)
             {
                 _position = pos;
@@ -354,17 +354,23 @@
             for (int i = 0; i < s.Length; i++)
             {
                 if (s[i] != '\\') { sb.Append(s[i]); continue; }
-
-                if (++i == s.Length) break;//alone /
-                char append;
+                if (++i == s.Length) break;
                 switch (s[i])
                 {
-                    case '\\': append = '\\'; break;
-                    case '"': append = '"'; break;
-                    case 'n': append = '\n'; break;
-                    default: append = s[i]; break;
+                    case '\\': sb.Append('\\'); break;
+                    case '"': sb.Append('"'); break;
+                    case 'n': sb.Append('\n'); break;
+                    case 'r': sb.Append('\r'); break;
+                    case 't': sb.Append('\t'); break;
+                    case 'u':
+                        if (i + 4 < s.Length && ushort.TryParse(s.Substring(i + 1, 4),
+                                NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var cp))
+                        {
+                            sb.Append((char)cp); i += 4; break;
+                        }
+                        sb.Append('u'); break;
+                    default: sb.Append(s[i]); break;
                 }
-                sb.Append(append);
             }
             return sb.ToString();
         }
@@ -666,6 +672,19 @@
             }
             if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && LooksLikeTupleDeconstructionDeclaration())
                 return ParseTupleDeconstructionDeclaration();
+            if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "var")
+            {
+                int savePos = _lexer.Position;
+                var saveType = _lexer.CurrentTokenType;
+                var saveText = _lexer.CurrentTokenText;
+
+                _lexer.NextToken(); //skip var
+                bool isVarTuple = LooksLikeVarTupleDeconstructionDeclaration();
+                _lexer.ResetCurrent(savePos, saveType, saveText);
+
+                if (isVarTuple)
+                    return ParseVarTupleDeconstructionDeclaration();
+            }
             if (_lexer.CurrentTokenType == Ast.TokenType.Keyword)
             {
                 if (IsClassModifier())
@@ -848,6 +867,35 @@
             return exprStatement;
         }
         #region Struct helpers
+        private bool LooksLikeVarTupleDeconstructionDeclaration()
+        {
+            if (_lexer.CurrentTokenType != Ast.TokenType.ParenOpen) 
+                return false;
+
+            int savePos = _lexer.Position;
+            var saveType = _lexer.CurrentTokenType;
+            var saveText = _lexer.CurrentTokenText;
+
+            _lexer.NextToken(); //skip (
+            bool sawAny = false;
+            while (true)
+            {
+                if (_lexer.CurrentTokenType != Ast.TokenType.Identifier) { sawAny = false; break; }
+                sawAny = true;
+                _lexer.NextToken(); //skip name
+
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                break;
+            }
+            if (!sawAny || _lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+            { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+
+            _lexer.NextToken(); //skip )
+            bool ok = _lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=";
+
+            _lexer.ResetCurrent(savePos, saveType, saveText);
+            return ok;
+        }
         private bool LooksLikeTupleDeconstructionDeclaration()
         {
             if (_lexer.CurrentTokenType != Ast.TokenType.ParenOpen) return false;
@@ -1172,6 +1220,21 @@
             {
                 if (_lexer.CurrentTokenType == Ast.TokenType.Keyword)
                 {
+                    if(_lexer.CurrentTokenText == "as")
+                    {
+                        _lexer.NextToken();//skip as
+                        if (!IsTypeKeyword(_lexer.CurrentTokenText))
+                            throw new ApplicationException("Type expected after 'as'");
+                        string typeStr = _lexer.CurrentTokenText;
+                        _lexer.NextToken();
+                        var baseType = Enum.Parse<Ast.ValueType>(typeStr, true);
+                        baseType = ReadMaybePointer(baseType);
+                        baseType = ReadMaybeNullable(baseType);
+                        var arrInfo = ReadArraySuffixes();
+                        if (arrInfo.isArray) baseType = Ast.ValueType.Array;
+                        left = new Ast.AsNode(baseType, left);
+                        continue;
+                    }
                     if (_lexer.CurrentTokenText == "is")
                     {
                         _lexer.NextToken();//skip is
@@ -1542,6 +1605,25 @@
                     {
                         var name = _lexer.CurrentTokenText;
                         _lexer.NextToken();
+                        if (IsOp("=>"))
+                        {
+                            _lexer.NextToken();
+                            var body = ParseExpression();
+                            string lambdaName = (++_anonCounter).ToString();
+                            Ast.ValueType? retType = null;
+                            if (body is not Ast.BlockNode)
+                                retType = Ast.ValueType.Object;
+
+                            var decl = new Ast.FunctionDeclarationNode(
+                                ret: retType,
+                                name: lambdaName,
+                                @params: new string[] { name },
+                                defVals: Array.Empty<Ast.AstNode>(),
+                                types: new Ast.ValueType[] { Ast.ValueType.Object },
+                                body: body);
+
+                            return new Ast.LambdaNode(decl);
+                        }
                         if (name == "true") return new Ast.LiteralNode(true);
                         if (name == "false") return new Ast.LiteralNode(false);
                         if (name == "null") return new Ast.LiteralNode(null);
@@ -1590,22 +1672,57 @@
                             _lexer.NextToken(); //skip (
                             string fullname = string.Join(".", parts);
                             var args = new List<Ast.AstNode>();
+                            var argNames = new List<string?>();
+                            bool sawNamed = false;
                             if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
                             {
-                                do
+                                while (true)
                                 {
-                                    args.Add(ParseExpression());
-                                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                    string? maybeName = null;
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
                                     {
+                                        int savePos = _lexer.Position;
+                                        var saveType = _lexer.CurrentTokenType;
+                                        var saveText = _lexer.CurrentTokenText;
+                                        string candidate = _lexer.CurrentTokenText;
                                         _lexer.NextToken();
-                                        continue;
+
+                                        if (_lexer.CurrentTokenType == Ast.TokenType.Colon)
+                                        {
+                                            sawNamed = true;
+                                            _lexer.NextToken(); // skip :
+                                            maybeName = candidate;
+                                            var valueExpr = ParseExpression();
+                                            argNames.Add(maybeName);
+                                            args.Add(valueExpr);
+                                        }
+                                        else
+                                        {
+                                            _lexer.ResetCurrent(savePos, saveType, saveText);
+
+                                            if (sawNamed)
+                                                throw new ApplicationException("Positional argument cannot appear after named argument.");
+
+                                            argNames.Add(null);
+                                            args.Add(ParseExpression());
+                                        }
+
                                     }
+                                    else
+                                    {
+                                        if (sawNamed)
+                                            throw new ApplicationException("Positional argument cannot appear after named argument.");
+
+                                        argNames.Add(null);
+                                        args.Add(ParseExpression());
+                                    }
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                    { _lexer.NextToken(); continue; }
                                     break;
                                 }
-                                while (true);
                             }
                             Consume(Ast.TokenType.ParenClose);
-                            return new Ast.CallNode(fullname, args.ToArray())
+                            return new Ast.CallNode(fullname, args.ToArray(), argNames.ToArray())
                             {
                                 Generic = callGeneric,
                                 IsNullConditional = lastNullConditional
@@ -1883,11 +2000,13 @@
                         {
                             do
                             {
-                                if (_lexer.CurrentTokenType != Ast.TokenType.String)
-                                    throw new NotImplementedException("Attribute params should be strings");
-
-                                args.Add(_lexer.CurrentTokenText);
-                                _lexer.NextToken();//skip string
+                                if (_lexer.CurrentTokenType is Ast.TokenType.String or Ast.TokenType.Number or Ast.TokenType.Char 
+                                    || (_lexer.CurrentTokenType is Ast.TokenType.Keyword && (_lexer.CurrentTokenText is "true" or "false")))
+                                {
+                                    args.Add(_lexer.CurrentTokenText);
+                                    _lexer.NextToken();
+                                }
+                                else throw new ApplicationException("Only constant attribute args are supported");
 
                                 if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
                                 { _lexer.NextToken(); continue; }
@@ -2226,6 +2345,31 @@
             decls.Add(assign);
             return decls.Count == 1 ? decls[0] : new Ast.StatementListNode(decls);
         }
+        private Ast.AstNode ParseVarTupleDeconstructionDeclaration()
+        {
+            Consume(Ast.TokenType.Keyword); //expect var
+            Consume(Ast.TokenType.ParenOpen);
+
+            var names = new List<string>();
+            while (true)
+            {
+                string name = _lexer.CurrentTokenText;
+                Consume(Ast.TokenType.Identifier);
+                names.Add(name);
+
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                break;
+            }
+
+            Consume(Ast.TokenType.ParenClose);
+            Consume(Ast.TokenType.Operator); //expect =
+            var rhs = ParseExpression();
+            Consume(Ast.TokenType.Semicolon);
+
+            var leftItems = names.Select(n => ((string?)null, (Ast.AstNode)new Ast.VariableReferenceNode(n))).ToArray();
+
+            return new Ast.BinOpNode(new Ast.TupleLiteralNode(leftItems), Ast.OperatorToken.Equals, rhs);
+        }
         #endregion
         #region Flow Control parser
         #region Loop parser
@@ -2465,7 +2609,29 @@
 
         #endregion
         #region Pattern parser
-        private Ast.PatternNode ParsePattern() => ParsePatternOr();
+        private Ast.PatternNode ParsePattern()
+        {
+            var pat = ParsePatternOr();
+
+            if (_lexer.CurrentTokenType == Ast.TokenType.Keyword &&
+                _lexer.CurrentTokenText == "when")
+            {
+                _lexer.NextToken(); //skip when
+                Ast.AstNode guard;
+                if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
+                {
+                    _lexer.NextToken();
+                    guard = ParseExpression();
+                    Consume(Ast.TokenType.ParenClose);
+                }
+                else
+                {
+                    guard = ParseExpression();
+                }
+                pat = new Ast.WhenPatternNode(pat, guard);
+            }
+            return pat;
+        }
         private Ast.PatternNode ParsePatternOr()
         {
             var left = ParsePatternAnd();
@@ -2902,7 +3068,7 @@
             }
 
             public void Unpin(int key) => _pinned.Remove(key);
-            private void CollectGarbage()
+            public void CollectGarbage()
             {
                 //Mark
                 HashSet<int> reachable = new();
@@ -3644,6 +3810,42 @@
                 return newPtr;
 
             }
+            public int ArrayReverse(int ptr)
+            {
+                var et = this.GetHeapObjectType(ptr);
+                int len = this.GetArrayLength(ptr), sz = this.GetTypeSize(et);
+                int np = this.Malloc(len * sz, et, isArray: true);
+                for (int i = 0; i < len; i++)
+                    this.RawMemory.AsSpan(ptr + i * sz, sz).CopyTo(this.RawMemory.AsSpan(np + (len - 1 - i) * sz, sz));
+                this.Free(ptr);
+                return np;
+            }
+            public int ArrayDistinct(int ptr)
+            {
+                var et = this.GetHeapObjectType(ptr);
+                int len = this.GetArrayLength(ptr), sz = this.GetTypeSize(et);
+                var seen = new HashSet<object?>();
+                var buf = new List<object?>();
+                for (int i = 0; i < len; i++)
+                {
+                    object? v = Ast.IsReferenceType(et)
+                        ? this.DerefReference(ptr + i * sz, et)
+                        : this.ReadFromStack(ptr + i * sz, et);
+                    if (seen.Add(v)) buf.Add(v);
+                }
+                return this.PackReference((buf.ToArray(), et), Ast.ValueType.Array);
+            }
+            public double ArrayAverage(int ptr)
+            {
+                var t = this.GetHeapObjectType(ptr);
+                if (t is not (Ast.ValueType.Int or Ast.ValueType.Long or Ast.ValueType.Float or Ast.ValueType.Double or Ast.ValueType.Decimal))
+                    throw new ApplicationException("Average: numeric arrays only");
+                int n = this.GetArrayLength(ptr);
+                if (n == 0) throw new InvalidOperationException("Empty sequence");
+                decimal sum = 0;
+                for (int i = 0; i < n; i++) sum += Convert.ToDecimal(this.ReadFromStack(ptr + i * this.GetTypeSize(t), t), CultureInfo.InvariantCulture);
+                return (double)(sum / n);
+            }
             public int ArraySort(int ptr, bool asc = true)
             {
                 var elemType = GetHeapObjectType(ptr);
@@ -4293,6 +4495,8 @@
                     case char: return ValueType.Char;
                     case string: return ValueType.String;
                     case bool: return ValueType.Bool;
+                    case TimeSpan: return ValueType.TimeSpan;
+                    case DateTime: return ValueType.DateTime;
                     default: return ValueType.Object;
                 }
             }
@@ -5414,7 +5618,7 @@
                 Context.RegisterNative(printNames[i], (TimeSpan str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
             }
 
-            this.Context.RegisterNative("Console.Write", (string str) => { if (Output.Length + str?.Length < MaxOutputLen) Output += (str + '\n'); if (consoleOutput) Console.Write(str); });
+            this.Context.RegisterNative("Console.Write", (string str) => { if (Output.Length + str?.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (int str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (ulong str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (double str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
@@ -5448,6 +5652,8 @@
                 => { int i = Context.ArrayIndexOf(varName, value); if (i < 0) return; Context.ArrayRemoveAt(varName, i); });
             this.Context.RegisterNative("Remove", (int ptr, object value)
                 => { int i = Context.ArrayIndexOf(ptr, value); if (i < 0) return ptr; return Context.ArrayRemoveAt(ptr, i); });
+            this.Context.RegisterNative("Reverse", (Func<int, int>)Context.ArrayReverse);
+            #region Linq
             this.Context.RegisterNative("Sort", (int ptr) => Context.ArraySort(ptr, asc: true));
             this.Context.RegisterNative("SortDescending", (int ptr) => Context.ArraySort(ptr, asc: false));
             this.Context.RegisterNative("SortBy", (int ptr, object key) => Context.ArraySortBy(ptr, key, asc: true));
@@ -5469,6 +5675,11 @@
             this.Context.RegisterNative("Single", (int p, object pr) => Context.ArrayFind(p, pr, false, false, true));
             this.Context.RegisterNative("SingleOrDefault", (int p, object pr) => Context.ArrayFind(p, pr, false, true, true));
             this.Context.RegisterNative("Concat", (Func<int, int, int>)Context.ArrayConcat);
+            this.Context.RegisterNative("Reverse", (Func<int, int>)Context.ArrayReverse);
+            this.Context.RegisterNative("Array.Reverse", (Func<int, int>)Context.ArrayReverse);
+            this.Context.RegisterNative("Distinct", (Func<int, int>)Context.ArrayDistinct);
+            this.Context.RegisterNative("Average", (Func<int, double>)Context.ArrayAverage);
+            #endregion
             this.Context.RegisterNative("Range", (Func<int, int, int>)Context.ArrayRange);
             this.Context.RegisterNative("Range", (int start) => Context.ArrayRange(0, start));
             this.Context.RegisterNative("InRange", (int ptr, int start, int end) => Context.ArraySlice(ptr, start, end));
@@ -5526,10 +5737,6 @@
             this.Context.RegisterNative("TimeSpan.Parse", (string s) => TimeSpan.Parse(s, CultureInfo.InvariantCulture));
             this.Context.RegisterNative("Ticks", (DateTime d) => d.Ticks);
             this.Context.RegisterNative("Ticks", (TimeSpan t) => t.Ticks);
-            this.Context.RegisterNative("DateTime.Add", (DateTime d, TimeSpan t) => d + t);
-            this.Context.RegisterNative("DateTime.Subtract", (DateTime d, TimeSpan t) => d - t);
-            this.Context.RegisterNative("TimeSpan.Subtract", (TimeSpan d, TimeSpan t) => d - t);
-            this.Context.RegisterNative("TimeSpan.Add", (TimeSpan d, TimeSpan t) => d + t);
             this.Context.RegisterNative("TimeSpan.FromSeconds", (double x) => TimeSpan.FromSeconds(x));
             this.Context.RegisterNative("TimeSpan.FromMinutes", (double x) => TimeSpan.FromMinutes(x));
             this.Context.RegisterNative("TimeSpan.FromHours", (double x) => TimeSpan.FromHours(x));
@@ -5538,8 +5745,31 @@
             this.Context.RegisterNative("TimeSpan.FromMicroseconds", (double x) => TimeSpan.FromMicroseconds(x));
             this.Context.RegisterNative("TimeSpan.FromTicks", (long x) => TimeSpan.FromTicks(x));
             #endregion
-            this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object[] callArgs)
-                => InvokeByAttribute(this.Context, attr, attrArgs, callArgs));
+            #region Math
+            this.Context.RegisterNative("Math.Abs", (double x) => Math.Abs(x));
+            this.Context.RegisterNative("Math.Sqrt", (double x) => Math.Sqrt(x));
+            this.Context.RegisterNative("Math.Floor", (double x) => Math.Floor(x));
+            this.Context.RegisterNative("Math.Ceiling", (double x) => Math.Ceiling(x));
+            this.Context.RegisterNative("Math.Round", (double x) => Math.Round(x));
+            this.Context.RegisterNative("Math.Truncate", (double x) => Math.Truncate(x));
+            this.Context.RegisterNative("Math.Sign", (double x) => Math.Sign(x));
+            this.Context.RegisterNative("Math.Min", (double a, double b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Max", (double a, double b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Clamp", (double v, double lo, double hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.Declare("Math.PI", Ast.ValueType.Double, Math.PI);
+            this.Context.Declare("Math.E", Ast.ValueType.Double, Math.E);
+            #endregion
+            #region string
+            this.Context.RegisterNative("String.Empty", () => "");
+            this.Context.RegisterNative("Trim", (string s) => s.Trim());
+            this.Context.RegisterNative("TrimStart", (string s) => s.TrimStart());
+            this.Context.RegisterNative("TrimEnd", (string s) => s.TrimEnd());
+            this.Context.RegisterNative("ToUpper", (string s) => s.ToUpperInvariant());
+            this.Context.RegisterNative("ToLower", (string s) => s.ToLowerInvariant());
+            this.Context.RegisterNative("StartsWith", (string s, string p) => s.StartsWith(p, StringComparison.Ordinal));
+            this.Context.RegisterNative("EndsWith", (string s, string p) => s.EndsWith(p, StringComparison.Ordinal));
+            this.Context.RegisterNative("PadLeft", (string s, int w) => s.PadLeft(w));
+            this.Context.RegisterNative("PadRight", (string s, int w) => s.PadRight(w));
             this.Context.RegisterNative("Split", (Func<string, string, int>)Split);
             this.Context.RegisterNative("Split", (Func<string, char, int>)((s, c) => Split(s, c.ToString())));
             this.Context.RegisterNative("Contains", (string str, string value) => { return str.Contains(value); });
@@ -5559,6 +5789,9 @@
             this.Context.RegisterNative("ToString", (DateTime val) => { return val.ToString(CultureInfo.InvariantCulture); });
             this.Context.RegisterNative("ToString", (TimeSpan val) => { return val.ToString(); });
             this.Context.RegisterNative("ToCharArray", (Func<string, int>)ToCharArray);
+            #endregion
+            this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object[] callArgs)
+                => InvokeByAttribute(this.Context, attr, attrArgs, callArgs));
             this.Context.RegisterNative("IntParse", (string val) => { return int.Parse(val); });
             this.Context.RegisterNative("Int.Parse", (string val) => { return int.Parse(val); });
             this.Context.RegisterNative("IntParse", (char val) => { return (int)(val - '0'); });
@@ -5588,7 +5821,8 @@
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object>)((id, a1, a2) => Context.InvokeById(id, a1, a2)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object, object>)((id, a1, a2, a3) => Context.InvokeById(id, a1, a2, a3)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object, object, object>)((id, a1, a2, a3, a4) => Context.InvokeById(id, a1, a2, a3, a4)));
-            this.Context.RegisterNative("Free", (Action<int>)Context.Free);
+            this.Context.RegisterNative("Free", (Action<int>)Context.Free); 
+            this.Context.RegisterNative("Guid.NewGuid", () => Guid.NewGuid().ToString("D"));
             this.Context.RegisterNative("PrintMemoryUsage", () => {
                 if (Output.Length < MaxOutputLen) Output +=
                     ($"{Context.MemoryUsed / 1024}Kb {Context.MemoryUsed % 1024}B used out of {(Context.RawMemory.Length - Context.StackSize) / 1024}Kb total");
@@ -5603,6 +5837,7 @@
             });
             this.Context.RegisterNative("GetMemoryDump", () => { var mem = Context.PrintMemory(); return mem; });
             this.Context.RegisterNative("GetMemoryDump", (int len) => { var mem = Context.PrintMemory(); return mem.Length > len ? mem.Substring(0, len) : mem; });
+            this.Context.RegisterNative("GC.Collect", () => { Context.CollectGarbage(); });
 
         }
         #region Helpers
@@ -6205,7 +6440,14 @@
                 else if (l is ushort us) result = EvaluateBinary(us, Convert.ToUInt16(r), Op);
                 else if (l is byte b) result = EvaluateBinary(b, Convert.ToByte(r), Op);
                 else if (l is sbyte sb) result = EvaluateBinary(sb, Convert.ToSByte(r), Op);
+                else if (l is DateTime dt && r is TimeSpan ts) result = Op switch
+                {
+                    OperatorToken.Plus or OperatorToken.PlusEqual => dt + ts,
+                    OperatorToken.Minus or OperatorToken.MinusEqual => dt - ts,
+                    _ => throw new ApplicationException($"Unsupported op {Op} for DateTime and TimeSpan")
+                };
                 else if (l is DateTime dl) result = EvaluateBinary(dl, Convert.ToDateTime(r), Op);
+                else if (l is TimeSpan tls && r is TimeSpan trs) result = EvaluateTimeSpan(tls, trs, Op);
                 else if (l is null) throw new ApplicationException($"Unsupported operator {Op} for null");
                 else throw new ApplicationException($"Unsupported operator {Op} for Type {l.GetType()}");
                 if (Left is VariableReferenceNode vr && IsAssignmentOp(Op))
@@ -6251,11 +6493,24 @@
                 return result;
             }
 
-
             private static bool IsAssignmentOp(OperatorToken op) => op is OperatorToken.Equals or OperatorToken.PlusEqual or
                 OperatorToken.MinusEqual or OperatorToken.MultiplyEqual or OperatorToken.DivideEqual or OperatorToken.ModuleEqual or
                 OperatorToken.NullDefaultEqual or OperatorToken.BitAndEqual or OperatorToken.BitOrEqual or OperatorToken.BitXorEqual or
                 OperatorToken.RightShiftEqual or OperatorToken.UnsignedRightShiftEqual or OperatorToken.LeftShiftEqual;
+            private static object EvaluateTimeSpan(TimeSpan l, TimeSpan r, OperatorToken op) => op switch
+            {
+                OperatorToken.Plus or OperatorToken.PlusEqual => l + r,
+                OperatorToken.Minus or OperatorToken.MinusEqual => l - r,
+
+                OperatorToken.Greater => l > r,
+                OperatorToken.GreaterOrEqual => l >= r,
+                OperatorToken.Less => l < r,
+                OperatorToken.LessOrEqual => l <= r,
+                OperatorToken.Equal => l == r,
+                OperatorToken.NotEqual => l != r,
+
+                _ => throw new ApplicationException($"Unsupported op {op} for TimeSpan")
+            };
             public static bool EvaluateBool(bool l, bool r, OperatorToken op) => op switch
             {
                 OperatorToken.Equals => r,
@@ -6282,9 +6537,9 @@
                     var ld = Convert.ToDateTime(l); var rd = Convert.ToDateTime(r);
                     return op switch
                     {
-                        OperatorToken.Minus => ld - rd,
-                        OperatorToken.MinusEqual => ld - rd,
+                        OperatorToken.Minus or OperatorToken.MinusEqual => ld - rd,
                         OperatorToken.Equal => ld == rd,
+                        OperatorToken.NotEqual => ld != rd,
                         OperatorToken.GreaterOrEqual => ld >= rd,
                         OperatorToken.LessOrEqual => ld <= rd,
                         OperatorToken.Less => ld < rd,
@@ -6443,6 +6698,70 @@
                 string childIndent = indent + (isLast ? "    " : "│   ");
                 Left.Print(childIndent, false);
                 Right.Print(childIndent, true);
+            }
+        }
+        public class AsNode : AstNode
+        {
+            public ValueType Target;
+            public AstNode Expr;
+            public AsNode(ValueType target, AstNode expr)
+            { Target = target; Expr = expr; }
+            public override object Evaluate(ExecutionContext ctx)
+            {
+                ctx.Check();
+                var v = Expr.Evaluate(ctx);
+                if (!IsReferenceType(Target) && Target != ValueType.Nullable && Target != ValueType.Object)
+                    throw new ApplicationException("'as' operator can only be applied to reference types");
+                if (v is null) return null!;
+                int ptr = -1;
+                ValueType type;
+                if (v is string)
+                {
+                    type = ValueType.String;
+                }
+                else if (v is int ip && ip >= ctx.StackSize && ip < ctx.StackSize + ctx.MemoryUsed)
+                {
+                    ptr = ip;
+                    type = ctx.IsArray(ip) ? ValueType.Array : ctx.GetHeapObjectType(ip);
+                }
+                else
+                {
+                    type = ExecutionContext.InferType(v);
+                }
+                switch (Target)
+                {
+                    case ValueType.String:
+                        if (type != ValueType.String) return null!;
+                        return v is string s ? s : ctx.ReadHeapString(ptr);
+                    case ValueType.Array:
+                        return type == ValueType.Array && ptr >= 0 ? ptr : null!;
+
+                    case ValueType.Struct:
+                        return type == ValueType.Struct && ptr >= 0 ? ptr : null!;
+
+                    case ValueType.Tuple:
+                        return type == ValueType.Tuple && ptr >= 0 ? ptr : null!;
+                    case ValueType.Nullable:
+                        if (type == ValueType.Nullable && ptr >= 0) return ptr;
+                        if (!IsReferenceType(type))
+                            return ctx.PackReference(v!, ValueType.Nullable);
+                        return null!;
+                    case ValueType.Object:
+                        if (v is string s2) return ctx.PackReference(s2, ValueType.Object);
+                        if (ptr >= 0 && type == ValueType.String)
+                            return ctx.PackReference(ctx.ReadHeapString(ptr), ValueType.Object);
+                        if (ExecutionContext.IsObject(v))
+                            return ctx.PackReference(v!, ValueType.Object);
+                        return null!;
+                    default:
+                        return null!;
+                }
+            }
+            public override void Print(string indent = "", bool isLast = true)
+            {
+                Console.WriteLine($"{indent}└── as({Target.ToString().ToLower()})");
+                string child = indent + (isLast ? "    " : "│   ");
+                Expr.Print(child, true);
             }
         }
         #endregion
@@ -7713,9 +8032,10 @@
         {
             public string Name;
             public AstNode[] Args;
+            public string?[]? ArgNames { get; }
             public GenericUse? Generic { get; init; }
             public bool IsNullConditional { get; init; }
-            public CallNode(string name, AstNode[] args) { Name = name; Args = args; }
+            public CallNode(string name, AstNode[] args, string?[]? argNames = null) { Name = name; Args = args; ArgNames = argNames; }
             public override object Evaluate(ExecutionContext ctx)
             {
                 ctx.Check();
@@ -7802,34 +8122,118 @@
                 Name = qName;
 
                 var callArgs = Args.Select(a => a.Evaluate(ctx)).ToArray();
-                var candidates = overloads2!.Where(f =>
+                var callNames = ArgNames ?? new string?[Args.Length];
+                bool TryMap(ExecutionContext.Function f, out Dictionary<int, object?> fixedMap, out List<object?> varargs, out string? error)
                 {
-                    int required = Enumerable.Range(0, f.ParamNames.Length).Count(i => f.DefaultValues[i] is null);
-                    bool hasParams = f.ParamsIndex >= 0;
-                    if (hasParams)
-                        return callArgs.Length >= required && callArgs.Length >= f.ParamsIndex;
-                    else
-                        return callArgs.Length >= required && callArgs.Length <= f.ParamNames.Length;
-                }).ToList();
-                int BestScore(ReadOnlySpan<object?> args, ExecutionContext.Function f)
-                {
-                    int score = 0;
-                    int limit = (f.ParamsIndex >= 0) ? Math.Min(f.ParamsIndex, args.Length) : Math.Min(f.ParamTypes.Length, args.Length);
-                    for (int i = 0; i < limit; i++)
+                    fixedMap = new Dictionary<int, object?>();
+                    varargs = new List<object?>();
+                    error = null;
+
+                    int prefixCount = f.ParamsIndex >= 0 ? f.ParamsIndex : f.ParamNames.Length;
+                    var usedFixed = new bool[prefixCount];
+
+                    bool sawNamed = false;
+                    int posCursor = 0;
+
+                    for (int i = 0; i < callArgs.Length; i++)
                     {
+                        var val = callArgs[i];
+                        var nm = i < callNames.Length ? callNames[i] : null;
+
+                        if (!string.IsNullOrEmpty(nm))
+                        {
+                            sawNamed = true;
+                            if (f.ParamsIndex >= 0 && string.Equals(nm, f.ParamNames[f.ParamsIndex], StringComparison.Ordinal))
+                            { error = "Passing 'params' by name is not supported."; return false; }
+
+                            int pi = Array.FindIndex(f.ParamNames, 0, prefixCount,
+                                                     p => string.Equals(p, nm, StringComparison.Ordinal));
+                            if (pi < 0) { error = $"No parameter named '{nm}'."; return false; }
+                            if (fixedMap.ContainsKey(pi)) { error = $"Parameter '{nm}' specified multiple times."; return false; }
+
+                            fixedMap[pi] = val;
+                            usedFixed[pi] = true;
+                        }
+                        else
+                        {
+                            if (sawNamed)
+                            {
+                                if (f.ParamsIndex >= 0)
+                                {
+                                    varargs.Add(val);
+                                    continue;
+                                }
+                                else
+                                {
+                                    error = "Positional argument cannot appear after named argument.";
+                                    return false;
+                                }
+                            }
+
+                            while (posCursor < prefixCount && usedFixed[posCursor]) posCursor++;
+                            if (posCursor < prefixCount)
+                            {
+                                fixedMap[posCursor] = val;
+                                usedFixed[posCursor] = true;
+                                posCursor++;
+                            }
+                            else if (f.ParamsIndex >= 0)
+                            {
+                                varargs.Add(val);
+                            }
+                            else
+                            {
+                                error = "Too many arguments for this overload.";
+                                return false;
+                            }
+                        }
+                    }
+
+                    for (int i = 0; i < prefixCount; i++)
+                    {
+                        bool required = f.DefaultValues[i] is null;
+                        if (required && !fixedMap.ContainsKey(i))
+                        {
+                            error = $"Required parameter '{f.ParamNames[i]}' was not supplied.";
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+
+                int BestScore(ExecutionContext.Function f, Dictionary<int, object?> fixedMap)
+                {
+                    int prefixCount = f.ParamsIndex >= 0 ? f.ParamsIndex : f.ParamTypes.Length;
+                    int score = 0;
+
+                    for (int i = 0; i < prefixCount; i++)
+                    {
+                        if (!fixedMap.TryGetValue(i, out var have)) continue;
                         var need = f.ParamTypes[i];
-                        var have = args[i];
+
                         if (have is null) score += need == ValueType.Object ? 2 : 0;
                         else if (Ast.MatchVariableType(have, need)) score += 3;
                         else if (need == ValueType.Object) score += 1;
                         else if (have is IConvertible) score += 0;
                         else return -1;
                     }
-                    if (f.ParamsIndex < 0 && args.Length == f.ParamTypes.Length) score += 1;
+                    if (Enumerable.Range(0, prefixCount).All(i => fixedMap.ContainsKey(i))) score += 1;
+
                     return score;
                 }
-                var best = candidates.Select(f => (fn: f, score: BestScore(callArgs, f))).Where(t => t.score >= 0)
-                    .OrderByDescending(t => t.score).FirstOrDefault();
+
+                var candidates = new List<(ExecutionContext.Function fn, Dictionary<int, object?> fixedMap, List<object?> varargs, int score)>();
+
+                foreach (var f in overloads2!)
+                {
+                    if (!TryMap(f, out var fm, out var va, out var err)) continue;
+                    int sc = BestScore(f, fm);
+                    if (sc >= 0) candidates.Add((f, fm, va, sc));
+                }
+
+                var best = candidates.OrderByDescending(t => t.score).FirstOrDefault();
+                if (best.fn.ParamNames is null || best.fn.ParamNames.Length == 0)
+                    throw new ApplicationException($"No overload '{Name}' matches given arguments.");
                 var fn = best.fn;
                 string fnNs = Name.Contains('.') ? Name.Substring(0, Name.LastIndexOf('.')) : "";
                 if (fnNs != ctx.CurrentNameSpace && !fn.IsPublic) throw new ApplicationException($"The function '{Name}' is inaccessible due to its protection level");
@@ -7876,7 +8280,7 @@
                         {
                             int want = gi.TypeParameters?.Length ?? 0;
                             int taken = 0;
-                            for (int i = 0; i < effectiveParamTypes.Length && i < callArgs.Length; i++)
+                            for (int i = 0; i < effectiveParamTypes.Length && i < best.fixedMap.Count; i++)
                             {
                                 ctx.Check();
                                 if (effectiveParamTypes[i] == Ast.ValueType.Object)
@@ -7896,16 +8300,15 @@
                     {
                         if (fn.ParamsIndex >= 0 && i == fn.ParamsIndex)
                         {
-                            if (callArgs.Length == fn.ParamNames.Length && callArgs[i] is int ptr && ptr >= ctx.StackSize && ptr < ctx.StackSize + ctx.MemoryUsed)
+                            if (best.varargs.Count == 1 && best.varargs[0] is int p && p >= ctx.StackSize 
+                                && p < ctx.StackSize + ctx.MemoryUsed && ctx.IsArray(p))
                             {
-                                ctx.Declare(fn.ParamNames[i], Ast.ValueType.Array, callArgs[i]);
+                                ctx.Declare(fn.ParamNames[i], Ast.ValueType.Array, p);
                             }
                             else
                             {
-                                int start = i;
-                                int count = Math.Max(0, callArgs.Length - start);
-                                object?[] tail = new object?[count];
-                                for (int k = 0; k < count; k++) tail[k] = callArgs[start + k];
+                                object?[] tail = best.varargs.ToArray();
+
                                 Ast.ValueType PickElemType(object?[] items)
                                 {
                                     Ast.ValueType et = Ast.ValueType.Object;
@@ -7929,7 +8332,10 @@
                             break;
                         }
                         object? val;
-                        if (i < callArgs.Length) val = callArgs[i];
+                        if (best.fixedMap.TryGetValue(i, out var supplied))
+                        {
+                            val = supplied;
+                        }
                         else
                         {
                             var defExpr = fn.DefaultValues[i];
@@ -7939,13 +8345,11 @@
                         }
 
                         var needType = effectiveParamTypes[i];
-
                         if (!MatchVariableType(val!, needType) && needType != Ast.ValueType.Object)
                         {
                             try { val = ctx.Cast(val!, needType); }
                             catch { throw new ApplicationException($"Cannot cast {val?.GetType().Name} to {needType}"); }
                         }
-
                         ctx.Declare(fn.ParamNames[i], needType, val);
                     }
                     var ret = fn.Body.Evaluate(ctx);
@@ -8026,10 +8430,13 @@
                     {
                         ctx.Check();
                         var s = raw.Trim().ToLowerInvariant();
-                        bool ok =
+                        bool ok = 
                             s == "numeric" ? IsNumeric(bound) :
-                            Enum.TryParse<Ast.ValueType>(raw, true, out var vt) ? vt == bound :
-                            false;
+                            s == "struct" ? ((!Ast.IsReferenceType(bound) && bound != Ast.ValueType.Nullable) || bound == Ast.ValueType.Struct) :
+                            s == "class" ? (Ast.IsReferenceType(bound) && bound != Ast.ValueType.Nullable) :
+                            s == "unmanaged" ? (!Ast.IsReferenceType(bound) && bound != Ast.ValueType.Nullable) :
+                            s == "notnull" ? (bound != Ast.ValueType.Nullable) :
+                            Enum.TryParse<Ast.ValueType>(raw, true, out var vt) ? vt == bound : false;
 
                         if (!ok)
                             throw new ApplicationException($"Generic constraint failed: '{tpName} : {raw}' does not match actual type '{bound}'.");
@@ -8495,7 +8902,7 @@
         public sealed class BinaryPatternNode : PatternNode
         {
             public readonly PatternNode Left, Right;
-            public readonly bool IsAnd; // true=and false=or
+            public readonly bool IsAnd;
             public BinaryPatternNode(PatternNode l, PatternNode r, bool andOp)
             { Left = l; Right = r; IsAnd = andOp; }
             public override bool Match(object? value, ExecutionContext context)
@@ -8506,7 +8913,7 @@
                 Console.WriteLine($"BinaryPatternNode");
             }
         }
-        public class IsPatternNode : AstNode
+        public sealed class IsPatternNode : AstNode
         {
             public readonly AstNode Expr;
             public readonly PatternNode Pattern;
@@ -8526,6 +8933,20 @@
                 Expr.Print(ind + (last ? "    " : "│   "), false);
                 Pattern.Print(ind + (last ? "    " : "│   "), true);
             }
+        }
+        public sealed class WhenPatternNode : PatternNode
+        {
+            public readonly PatternNode Inner;
+            public readonly AstNode Guard;
+
+            public WhenPatternNode(PatternNode inner, AstNode guard)
+            { Inner = inner; Guard = guard; }
+
+            public override bool Match(object? value, ExecutionContext ctx)
+                => Inner.Match(value, ctx) && Convert.ToBoolean(Guard.Evaluate(ctx));
+
+            public override void Print(string indent = "", bool last = true)
+                => Console.WriteLine("WhenPatternNode");
         }
         public class SwitchExprNode : AstNode
         {
@@ -8556,6 +8977,7 @@
             }
 
         }
+        
         #endregion
     }
 }
