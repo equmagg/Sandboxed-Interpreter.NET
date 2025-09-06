@@ -1643,7 +1643,7 @@
                             _lexer.NextToken();
                         }
 
-                        var node = new Ast.VariableReferenceNode(name);
+                        Ast.AstNode node = new Ast.VariableReferenceNode(name);
                         Ast.GenericUse? callGeneric = null;
                         if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<")
                         {
@@ -1760,15 +1760,34 @@
                                 if (hasStart) args.Add(startExpr!);
                                 if (endExpr != null) args.Add(endExpr);
 
-                                return new Ast.CallNode("InRange", args.ToArray()) { IsNullConditional = nullIndex };
+                                node = new Ast.CallNode("InRange", args.ToArray()) { IsNullConditional = nullIndex };
+                                continue;
                             }
-
-
 
 
                             Ast.AstNode indexExpr = hasStart ? startExpr! : ParseExpression();
                             Consume(Ast.TokenType.BracketsClose); //skip ]
-                            return new Ast.ArrayIndexNode(node, indexExpr, fromEnd, nullIndex);
+                            node = new Ast.ArrayIndexNode(node, indexExpr, fromEnd, nullIndex);
+                            continue;
+                        }
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Dot)
+                        {
+                            var memberParts = new List<string>();
+                            bool anyNullConditional = false;
+                            do
+                            {
+                                anyNullConditional = _lexer.CurrentTokenText == "?.";
+                                _lexer.NextToken();
+
+                                if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+                                    throw new ApplicationException("Identifier expected after '.'");
+
+                                memberParts.Add(_lexer.CurrentTokenText);
+                                _lexer.NextToken(); //skip name
+                            }
+                            while (_lexer.CurrentTokenType == Ast.TokenType.Dot);
+
+                            return new Ast.UnresolvedReferenceNode(memberParts, anyNullConditional, root: node);
                         }
                         if (parts.Count > 1) //arr.Length
                         {
@@ -2883,7 +2902,7 @@
                 { Ast.ValueType.Short,  (heap, offset)=>BitConverter.ToInt16 (heap, offset) },
                 { Ast.ValueType.UShort, (heap, offset)=>BitConverter.ToUInt16(heap, offset) },
                 { Ast.ValueType.Byte,   (heap, offset)=>heap[offset] },
-                { Ast.ValueType.Sbyte,  (heap, offset)=>(sbyte)heap[offset] },
+                { Ast.ValueType.Sbyte,  (heap, offset)=>unchecked((sbyte)heap[offset]) },
                 { Ast.ValueType.Decimal,(heap, offset)=>BitConverter.ToUInt32(heap, offset)},
                 { Ast.ValueType.DateTime, (heap, offset) => new DateTime(BitConverter.ToInt64(heap, offset), DateTimeKind.Unspecified) },
                 { Ast.ValueType.TimeSpan, (heap, offset) => new TimeSpan(BitConverter.ToInt64(heap, offset)) },
@@ -2909,6 +2928,9 @@
                 { Ast.ValueType.Uint, (heap, offset, value) => BitConverter.GetBytes((uint)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Short, (heap, offset, value) => BitConverter.GetBytes((short)value).CopyTo(heap, offset) },
                 { Ast.ValueType.UShort, (heap, offset, value) => BitConverter.GetBytes((ushort)value).CopyTo(heap, offset) },
+                { Ast.ValueType.Byte, (heap, offset, value) => heap[offset] = (byte)value },
+                { Ast.ValueType.Sbyte, (heap, offset, value) => heap[offset] = unchecked((byte)(sbyte)value) },
+                { Ast.ValueType.Decimal, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.DateTime, (heap, offset, value) => BitConverter.GetBytes(((DateTime)value).Ticks).CopyTo(heap, offset) },
                 { Ast.ValueType.TimeSpan, (heap, offset, value) => BitConverter.GetBytes(((TimeSpan)value).Ticks).CopyTo(heap, offset) },
             };
@@ -3238,8 +3260,8 @@
                     _memory[pos] = (byte)(len & 0xFF);
                     _memory[pos + 1] = (byte)((len >> 8) & 0xFF);
                     _memory[pos + 2] = (byte)((len >> 16) & 0xFF);
-                    if ((byte)vt > 0x7F)   // 0x7F = 127
-                        throw new ArgumentOutOfRangeException(nameof(vt), "Must fit into 7 bits (0‑127)");
+                    if ((byte)vt > 0x3F)   // 0x3F = 63
+                        throw new ArgumentOutOfRangeException(nameof(vt), "Must fit into 6 bits (0‑63)");
                 }
                 _memory[pos + 3] = (byte)((byte)vt | (isArray ? ArrayMask : 0) | (used ? UsedMask : 0));
 
@@ -3723,14 +3745,6 @@
 
             }
 
-            public int ArrayIndexOf(string name, object element)
-            {
-                if (Get(name).Type != ValueType.Array)
-                    throw new ApplicationException($"{name} is not an array");
-
-                int ptr = (int)ReadVariable(name);
-                return ArrayIndexOf(ptr, element);
-            }
 
             public int ArrayIndexOf(int ptr, object element)
             {
@@ -3749,6 +3763,23 @@
                     object current = IsReferenceType(elemType) ? DerefReference(addr, elemType)! : ReadFromStack(addr, elemType);
 
                     if ((current == null && element == null) || current?.Equals(element) == true)
+                        return i;
+                }
+                return -1;
+            }
+            public int ArrayFindIndex(int ptr, object predicate)
+            {
+                var elemType = GetHeapObjectType(ptr);
+                int len = GetArrayLength(ptr);
+                int eSize = GetTypeSize(elemType);
+                int lambdaId = Convert.ToInt32(predicate);
+
+                for (int i = 0; i < len; i++)
+                {
+                    Check();
+                    int addr = ptr + i * eSize;
+                    object? val = IsReferenceType(elemType) ? DerefReference(addr, elemType) : ReadFromStack(addr, elemType);
+                    if (Convert.ToBoolean(InvokeById(lambdaId, val!)))
                         return i;
                 }
                 return -1;
@@ -4557,6 +4588,9 @@
                    o.GetType().IsValueType == false && o is not Array;
             public object InvokeById(object id, params object[] args)
             {
+                if (id is Ast.ReturnSignal idSig)
+                    id = idSig.Value ?? throw new ApplicationException("Cannot invoke null function id");
+
                 string name = id?.ToString()!;
 
                 if (!Functions.TryGetValue(name, out var overloads))
@@ -4570,8 +4604,14 @@
                 {
                     for (int i = 0; i < fn.ParamNames.Length; i++)
                         Declare(fn.ParamNames[i], fn.ParamTypes[i], args[i]);
-
-                    return fn.Body.Evaluate(this);
+                    var raw = fn.Body.Evaluate(this);
+                    if (raw is Ast.ReturnSignal rs)
+                    {
+                        var val = rs.Value;
+                        if (rs.PinKey != -1) Unpin(rs.PinKey);
+                        return val!;
+                    }
+                    return raw!;
                 }
                 finally
                 {
@@ -5644,15 +5684,10 @@
             this.Context.RegisterNative("Add", (Func<int, object, int>)Context.ArrayAdd);
             this.Context.RegisterNative("AddAt", (Action<string, int, object>)Context.ArrayAddAt);
             this.Context.RegisterNative("AddAt", (Func<int, int, object, int>)Context.ArrayAddAt);
-            this.Context.RegisterNative("IndexOf", (Func<string, object, int>)Context.ArrayIndexOf);
-            this.Context.RegisterNative("IndexOf", (Func<int, object, int>)Context.ArrayIndexOf);
             this.Context.RegisterNative("RemoveAt", (Action<string, int>)Context.ArrayRemoveAt);
             this.Context.RegisterNative("RemoveAt", (Func<int, int, int>)Context.ArrayRemoveAt);
-            this.Context.RegisterNative("Remove", (string varName, object value)
-                => { int i = Context.ArrayIndexOf(varName, value); if (i < 0) return; Context.ArrayRemoveAt(varName, i); });
             this.Context.RegisterNative("Remove", (int ptr, object value)
                 => { int i = Context.ArrayIndexOf(ptr, value); if (i < 0) return ptr; return Context.ArrayRemoveAt(ptr, i); });
-            this.Context.RegisterNative("Reverse", (Func<int, int>)Context.ArrayReverse);
             #region Linq
             this.Context.RegisterNative("Sort", (int ptr) => Context.ArraySort(ptr, asc: true));
             this.Context.RegisterNative("SortDescending", (int ptr) => Context.ArraySort(ptr, asc: false));
@@ -5679,6 +5714,8 @@
             this.Context.RegisterNative("Array.Reverse", (Func<int, int>)Context.ArrayReverse);
             this.Context.RegisterNative("Distinct", (Func<int, int>)Context.ArrayDistinct);
             this.Context.RegisterNative("Average", (Func<int, double>)Context.ArrayAverage);
+            this.Context.RegisterNative("IndexOf", (Func<int, object, int>)Context.ArrayIndexOf);
+            this.Context.RegisterNative("FindIndex", (int p, object pr) => Context.ArrayFindIndex(p, pr));
             #endregion
             this.Context.RegisterNative("Range", (Func<int, int, int>)Context.ArrayRange);
             this.Context.RegisterNative("Range", (int start) => Context.ArrayRange(0, start));
@@ -5686,30 +5723,35 @@
             this.Context.RegisterNative("InRange", (int ptr, int end) => Context.ArraySlice(ptr, 0, end));
             this.Context.RegisterNative("InRange", (string s, int start, int end) => s.Substring(start, end - start));
             this.Context.RegisterNative("InRange", (string s, int end) => s.Substring(0, end));
-            this.Context.RegisterNative("IsNullOrEmpty", (string str) => string.IsNullOrEmpty(str));
-            this.Context.RegisterNative("String.IsNullOrEmpty", (string str) => string.IsNullOrEmpty(str));
-            this.Context.RegisterNative("IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
-            this.Context.RegisterNative("String.IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
-            this.Context.RegisterNative("Substring", (string str, int start) => Context.PackReference(str.Substring(start), ValueType.String));
-            this.Context.RegisterNative("Substring", (string str, int start, int len) => Context.PackReference(str.Substring(start, len), ValueType.String));
-            this.Context.RegisterNative("Pow", (Func<double, double, double>)Math.Pow);
-            this.Context.RegisterNative("Math.Pow", (Func<double, double, double>)Math.Pow);
+            #region char
             this.Context.RegisterNative("IsDigit", (char c) => { return char.IsDigit(c); });
             this.Context.RegisterNative("Char.IsDigit", (char c) => { return char.IsDigit(c); });
             this.Context.RegisterNative("IsLetter", (char c) => { return char.IsLetter(c); });
             this.Context.RegisterNative("Char.IsLetter", (char c) => { return char.IsLetter(c); });
-            this.Context.RegisterNative("Numeric", (string str) => { return ulong.TryParse(str, out _); });
-            this.Context.RegisterNative("IsNumber", (string str) => { return double.TryParse(str, out _); });
+            this.Context.RegisterNative("IsWhiteSpace", (char c) => { return char.IsWhiteSpace(c); });
+            this.Context.RegisterNative("Char.IsWhiteSpace", (char c) => { return char.IsWhiteSpace(c); });
+            this.Context.RegisterNative("IsLetterOrDigit", (char c) => { return char.IsLetterOrDigit(c); });
+            this.Context.RegisterNative("Char.IsLetterOrDigit", (char c) => { return char.IsLetterOrDigit(c); });
+            this.Context.RegisterNative("Char.ToUpper", (char c) => { return char.ToUpperInvariant(c); });
+            this.Context.RegisterNative("ToUpper", (char c) => { return char.ToUpperInvariant(c); });
+            this.Context.RegisterNative("Char.ToLower", (char c) => { return char.ToLowerInvariant(c); });
+            this.Context.RegisterNative("ToLower", (char c) => { return char.ToLowerInvariant(c); });
+            #endregion
             this.Context.RegisterNative("Join", (Func<string, string, string>)Join);
             this.Context.RegisterNative("Join", (int varaiable, char separator) => { return Join(separator.ToString(), varaiable); });
             this.Context.RegisterNative("String.Join", (char separator, int varaiable) => { return Join(separator.ToString(), varaiable); });
             this.Context.RegisterNative("Join", (int varaiable, string separator) => { return Join(separator, varaiable); });
             this.Context.RegisterNative("String.Join", (string separator, int varaiable) => { return Join(separator, varaiable); });
             this.Context.RegisterNative("Join", (int varaiable) => { return Join(", ", varaiable); });
+            #region Random
             this.Context.RegisterNative("Random.Next", (Func<int, int, int>)Random.Shared.Next);
             this.Context.RegisterNative("Random.Shared.Next", (Func<int, int, int>)Random.Shared.Next);
             this.Context.RegisterNative("Random.Shared.Next", (Func<int, int>)Random.Shared.Next);
+            this.Context.RegisterNative("Random.Shared.NextInt64", (Func<long>)Random.Shared.NextInt64);
+            this.Context.RegisterNative("Random.Shared.NextInt64", (Func<long, long>)Random.Shared.NextInt64);
             this.Context.RegisterNative("Random.Shared.NextDouble", (Func<double>)Random.Shared.NextDouble);
+            this.Context.RegisterNative("Random.Shared.NextSingle", (Func<float>)Random.Shared.NextSingle);
+            #endregion
             #region DateTime
             this.Context.RegisterNative("DateTime.UtcNow", () => { return DateTime.UtcNow; });
             this.Context.RegisterNative("DateTime.UtcNow.Year", () => { return DateTime.UtcNow.Year; });
@@ -5733,6 +5775,7 @@
             this.Context.RegisterNative("DateTime.Now.Millisecond", () => { return DateTime.Now.Millisecond; });
             this.Context.RegisterNative("DateTime.Now.Nanosecond", () => { return DateTime.Now.Nanosecond; });
             this.Context.RegisterNative("DateTime.Now.Ticks", () => { return DateTime.Now.Ticks; });
+            this.Context.RegisterNative("DateTime.Today", () => { return DateTime.Today; });
             this.Context.RegisterNative("DateTime.Parse", (string s) => DateTime.Parse(s, CultureInfo.InvariantCulture));
             this.Context.RegisterNative("TimeSpan.Parse", (string s) => TimeSpan.Parse(s, CultureInfo.InvariantCulture));
             this.Context.RegisterNative("Ticks", (DateTime d) => d.Ticks);
@@ -5747,20 +5790,115 @@
             #endregion
             #region Math
             this.Context.RegisterNative("Math.Abs", (double x) => Math.Abs(x));
+            this.Context.RegisterNative("Math.Abs", (decimal x) => Math.Abs(x));
+            this.Context.RegisterNative("Math.Abs", (int x) => Math.Abs(x));
+            this.Context.RegisterNative("Math.Abs", (long x) => Math.Abs(x));
+            this.Context.RegisterNative("Math.Abs", (short x) => Math.Abs(x));
+            this.Context.RegisterNative("Math.Abs", (sbyte x) => Math.Abs(x));
+            this.Context.RegisterNative("Math.Abs", (float x) => Math.Abs(x));
             this.Context.RegisterNative("Math.Sqrt", (double x) => Math.Sqrt(x));
+            this.Context.RegisterNative("Math.Cbrt", (double x) => Math.Cbrt(x));
             this.Context.RegisterNative("Math.Floor", (double x) => Math.Floor(x));
+            this.Context.RegisterNative("Math.Floor", (float x) => Math.Floor(x));
             this.Context.RegisterNative("Math.Ceiling", (double x) => Math.Ceiling(x));
+            this.Context.RegisterNative("Math.Ceiling", (float x) => Math.Ceiling(x));
             this.Context.RegisterNative("Math.Round", (double x) => Math.Round(x));
+            this.Context.RegisterNative("Math.Round", (float x) => Math.Round(x));
+            this.Context.RegisterNative("Math.Round", (Func<double, int, double>)Math.Round);
             this.Context.RegisterNative("Math.Truncate", (double x) => Math.Truncate(x));
             this.Context.RegisterNative("Math.Sign", (double x) => Math.Sign(x));
+            this.Context.RegisterNative("Math.Sign", (float x) => Math.Sign(x));
+            this.Context.RegisterNative("Math.Sign", (int x) => Math.Sign(x));
+            this.Context.RegisterNative("Math.Sign", (long x) => Math.Sign(x));
             this.Context.RegisterNative("Math.Min", (double a, double b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (decimal a, decimal b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (float a, float b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (int a, int b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (uint a, uint b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (long a, long b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (ulong a, ulong b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (short a, short b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (ushort a, ushort b) => Math.Min(a, b));
+            this.Context.RegisterNative("Math.Min", (sbyte a, sbyte b) => Math.Min(a, b));
             this.Context.RegisterNative("Math.Max", (double a, double b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (decimal a, decimal b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (float a, float b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (int a, int b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (uint a, uint b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (long a, long b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (ulong a, ulong b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (short a, short b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (ushort a, ushort b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Max", (sbyte a, sbyte b) => Math.Max(a, b));
+            this.Context.RegisterNative("Math.Cos", (double a) => Math.Cos(a));
+            this.Context.RegisterNative("Math.Acos", (double a) => Math.Acos(a));
+            this.Context.RegisterNative("Math.Cosh", (double a) => Math.Cosh(a));
+            this.Context.RegisterNative("Math.Sin", (double a) => Math.Sin(a));
+            this.Context.RegisterNative("Math.Asin", (double a) => Math.Asin(a));
+            this.Context.RegisterNative("Math.Sinh", (double a) => Math.Sinh(a));
+            this.Context.RegisterNative("Math.Tan", (double a) => Math.Tan(a));
+            this.Context.RegisterNative("Math.Tanh", (double a) => Math.Tanh(a));
+            this.Context.RegisterNative("Math.Log", (double a) => Math.Log(a));
+            this.Context.RegisterNative("Math.Log2", (double a) => Math.Log2(a));
+            this.Context.RegisterNative("Math.Log10", (double a) => Math.Log10(a));
+            this.Context.RegisterNative("Math.Exp", (double a) => Math.Exp(a));
+            this.Context.RegisterNative("Math.Pow", (Func<double, double, double>)Math.Pow);
+            this.Context.RegisterNative("Math.Lerp", (double v1, double v2, double a) => (v1 * (1.0 - a)) + (v2 * a));
+            this.Context.RegisterNative("Math.Lerp", (float v1, float v2, float a) => (v1 * (1.0 - a)) + (v2 * a));
+            this.Context.RegisterNative("Math.Lerp", (decimal v1, decimal v2, decimal a) => (v1 * (1.0m - a)) + (v2 * a));
+            this.Context.RegisterNative("Double.Lerp", (double a, double v1, double v2) => (v1 * (1.0 - a)) + (v2 * a));
+            this.Context.RegisterNative("Single.Lerp", (float v1, float v2, float a) => (v1 * (1.0 - a)) + (v2 * a));
             this.Context.RegisterNative("Math.Clamp", (double v, double lo, double hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (decimal v, decimal lo, decimal hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (float v, float lo, float hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (int v, int lo, int hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (uint v, uint lo, uint hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (long v, long lo, long hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (ulong v, ulong lo, ulong hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (short v, short lo, short hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (ushort v, ushort lo, ushort hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (byte v, byte lo, byte hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp", (sbyte v, sbyte lo, sbyte hi) => Math.Min(Math.Max(v, lo), hi));
+            this.Context.RegisterNative("Math.Clamp01", (double v) => Math.Min(Math.Max(v, 0), 1));
+            this.Context.RegisterNative("Math.Clamp01", (float v) => Math.Min(Math.Max(v, 0), 1));
+            this.Context.RegisterNative("Math.Clamp01", (decimal v) => Math.Min(Math.Max(v, 0), 1));
             this.Context.Declare("Math.PI", Ast.ValueType.Double, Math.PI);
             this.Context.Declare("Math.E", Ast.ValueType.Double, Math.E);
+            this.Context.Declare("Math.Tau", Ast.ValueType.Double, Math.Tau);
+            this.Context.Declare("Double.Epsilon", Ast.ValueType.Double, Double.Epsilon);
+            this.Context.Declare("Single.Epsilon", Ast.ValueType.Float, Single.Epsilon);
+            this.Context.Declare("Double.MinValue", Ast.ValueType.Double, Double.MinValue);
+            this.Context.Declare("Double.MaxValue", Ast.ValueType.Double, Double.MaxValue);
+            this.Context.Declare("Single.MinValue", Ast.ValueType.Float, Single.MinValue);
+            this.Context.Declare("Single.MaxValue", Ast.ValueType.Float, Single.MaxValue);
+            this.Context.Declare("Byte.MinValue", Ast.ValueType.Byte, Byte.MinValue);
+            this.Context.Declare("Byte.MaxValue", Ast.ValueType.Byte, Byte.MaxValue);
+            this.Context.Declare("SByte.MinValue", Ast.ValueType.Sbyte, SByte.MinValue);
+            this.Context.Declare("SByte.MaxValue", Ast.ValueType.Sbyte, SByte.MaxValue);
+            this.Context.Declare("Int16.MinValue", Ast.ValueType.Short, Int16.MinValue);
+            this.Context.Declare("Int16.MaxValue", Ast.ValueType.Short, Int16.MaxValue);
+            this.Context.Declare("UInt16.MinValue", Ast.ValueType.UShort, UInt16.MinValue);
+            this.Context.Declare("UInt16.MaxValue", Ast.ValueType.UShort, UInt16.MaxValue);
+            this.Context.Declare("Int32.MinValue", Ast.ValueType.Int, Int32.MinValue);
+            this.Context.Declare("Int32.MaxValue", Ast.ValueType.Int, Int32.MaxValue);
+            this.Context.Declare("UInt32.MinValue", Ast.ValueType.Uint, UInt32.MinValue);
+            this.Context.Declare("UInt32.MaxValue", Ast.ValueType.Uint, UInt32.MaxValue);
+            this.Context.Declare("Int64.MinValue", Ast.ValueType.Long, Int64.MinValue);
+            this.Context.Declare("Int64.MaxValue", Ast.ValueType.Long, Int64.MaxValue);
+            this.Context.Declare("UInt64.MinValue", Ast.ValueType.Ulong, UInt64.MinValue);
+            this.Context.Declare("UInt64.MaxValue", Ast.ValueType.Ulong, UInt64.MaxValue);
+            this.Context.Declare("Char.MinValue", Ast.ValueType.Char, Char.MinValue);
+            this.Context.Declare("Char.MaxValue", Ast.ValueType.Char, Char.MaxValue);
             #endregion
             #region string
             this.Context.RegisterNative("String.Empty", () => "");
+            this.Context.RegisterNative("Environment.NewLine", () => "\n");
+            this.Context.RegisterNative("IsNullOrEmpty", (string str) => string.IsNullOrEmpty(str));
+            this.Context.RegisterNative("String.IsNullOrEmpty", (string str) => string.IsNullOrEmpty(str));
+            this.Context.RegisterNative("IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
+            this.Context.RegisterNative("String.IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
+            this.Context.RegisterNative("Substring", (string str, int start) => Context.PackReference(str.Substring(start), ValueType.String));
+            this.Context.RegisterNative("Substring", (string str, int start, int len) => Context.PackReference(str.Substring(start, len), ValueType.String));
             this.Context.RegisterNative("Trim", (string s) => s.Trim());
             this.Context.RegisterNative("TrimStart", (string s) => s.TrimStart());
             this.Context.RegisterNative("TrimEnd", (string s) => s.TrimEnd());
@@ -5789,6 +5927,18 @@
             this.Context.RegisterNative("ToString", (DateTime val) => { return val.ToString(CultureInfo.InvariantCulture); });
             this.Context.RegisterNative("ToString", (TimeSpan val) => { return val.ToString(); });
             this.Context.RegisterNative("ToCharArray", (Func<string, int>)ToCharArray);
+            this.Context.RegisterNative("IndexOf", (string str, string val) => str.IndexOf(val));
+            this.Context.RegisterNative("IndexOf", (string str, char val) => str.IndexOf(val));
+            this.Context.RegisterNative("LastIndexOf", (string str, string val) => str.LastIndexOf(val));
+            this.Context.RegisterNative("LastIndexOf", (string str, char val) => str.LastIndexOf(val));
+            this.Context.RegisterNative("EqualsIgnoreCase", (string str, string str2)=>str.Equals(str2, StringComparison.OrdinalIgnoreCase));
+            this.Context.RegisterNative("Numeric", (string str) => { return ulong.TryParse(str, out _); });
+            this.Context.RegisterNative("IsNumber", (string str) => { return double.TryParse(str, out _); });
+            this.Context.RegisterNative("Replace", (string str, string old, string newStr) => { return str.Replace(old, newStr); });
+            this.Context.RegisterNative("Replace", (string str, char old, char newStr) => { return str.Replace(old, newStr); });
+            this.Context.RegisterNative("Replace", (string str, char old, string newStr) => { return str.Replace(old.ToString(), newStr); });
+            this.Context.RegisterNative("Remove", (string str, char old) => { return str.Replace(old.ToString(), ""); });
+            this.Context.RegisterNative("Remove", (string str, string old) => { return str.Replace(old, ""); });
             #endregion
             this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object[] callArgs)
                 => InvokeByAttribute(this.Context, attr, attrArgs, callArgs));
@@ -5813,9 +5963,6 @@
             this.Context.RegisterNative("Byte.Parse", (string val) => { return byte.Parse(val); });
             this.Context.RegisterNative("ByteParse", (char val) => { return (byte)(val - '0'); });
             this.Context.RegisterNative("Byte.Parse", (char val) => { return (byte)(val - '0'); });
-            this.Context.RegisterNative("Replace", (string str, string old, string newStr) => { return str.Replace(old, newStr); });
-            this.Context.RegisterNative("Replace", (string str, char old, char newStr) => { return str.Replace(old, newStr); });
-            this.Context.RegisterNative("Replace", (string str, char old, string newStr) => { return str.Replace(old.ToString(), newStr); });
             this.Context.RegisterNative("Invoke", (Func<object, object>)(id => Context.InvokeById(id)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object>)((id, a1) => Context.InvokeById(id, a1)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object>)((id, a1, a2) => Context.InvokeById(id, a1, a2)));
@@ -6990,30 +7137,75 @@
         {
             public ValueType ElementType { get; }
             public AstNode[] LengthExprs { get; }
-
-            public NewArrayNode(ValueType elem, AstNode[] len)
+            public int Rank { get; }
+            public NewArrayNode(ValueType elem, AstNode[] len, int rank = 1)
             {
                 ElementType = elem;
                 LengthExprs = len;
+                Rank = Math.Max(1, rank);
             }
 
             public override object Evaluate(ExecutionContext context)
             {
                 context.Check();
-                var len = LengthExprs[0].Evaluate(context);
-
-                if (len is int i)
+                if (Rank == 1)
                 {
-                    int size = checked(i * context.GetTypeSize(ElementType));
-                    if (size >= context.RawMemory.Length - context.StackSize) throw new OutOfMemoryException();
-                    return (i, ElementType);
+                    var len = LengthExprs[0].Evaluate(context);
+
+                    if (len is int i)
+                    {
+                        int size = checked(i * context.GetTypeSize(ElementType));
+                        if (size >= context.RawMemory.Length - context.StackSize) throw new OutOfMemoryException();
+                        return (i, ElementType);
+                    }
+                    else return null!;
                 }
-                else return null!;
+                if (LengthExprs.Length == 0)
+                    throw new ApplicationException("At least the first dimension length must be specified for jagged arrays.");
+                int[] dims = new int[LengthExprs.Length];
+                for (int i = 0; i < dims.Length; i++)
+                {
+                    int v = Convert.ToInt32(LengthExprs[i].Evaluate(context));
+                    if (v < 0) throw new ApplicationException("Array length must be non-negative");
+                    dims[i] = v;
+                }
+                int Allocate(ValueType leaf, ReadOnlySpan<int> known, int ranksLeft)
+                {
+                    if (ranksLeft == 1)
+                    {
+                        if (known.Length < 1) throw new ApplicationException("Internal: missing leaf length");
+                        int n = known[0];
+                        int elemSize = context.GetTypeSize(leaf);
+                        int bytes = checked(n * elemSize);
+                        int p = context.Malloc(bytes, leaf, isArray: true);
+                        if (Ast.IsReferenceType(leaf))
+                            context.RawMemory.AsSpan(p, bytes).Fill(0xFF);
+                        else 
+                            context.RawMemory.AsSpan(p, bytes).Clear();
+                        return p;
+                    }
+                    if (known.Length < 1) throw new ApplicationException("Internal: missing dimension length");
+                    int len = known[0];
+                    int top = context.Malloc(len * sizeof(int), ValueType.Array, isArray: true);
+                    context.RawMemory.AsSpan(top, len * sizeof(int)).Fill(0xFF);
+                    if (known.Length >= 2)
+                    {
+                        for (int i = 0; i < len; i++)
+                        {
+                            int child = Allocate(leaf, known.Slice(1), ranksLeft - 1);
+                            BitConverter.GetBytes(child).CopyTo(context.RawMemory, top + i * sizeof(int));
+                        }
+                    }
+                    return top;
+                }
+                if (LengthExprs.Length == Rank)
+                    return Allocate(ElementType, dims, Rank);
+                return Allocate(ElementType, dims.AsSpan(0, 1), Rank);
             }
 
             public override void Print(string indent = "", bool last = true)
             {
-                Console.WriteLine($"{indent}└── new {ElementType.ToString().ToLower()}[ ]");
+                Console.WriteLine($"{indent}└── new {ElementType.ToString().ToLower()}[{(Rank>1?$"rank:{Rank}":" ")}]");
                 foreach (var len in LengthExprs)
                     len.Print(indent + (last ? "    " : "│   "), true);
             }
@@ -7088,8 +7280,12 @@
                 if (!MatchVariableType(value, vt))
                     value = context.Cast(value, vt);
                 var incoming = ExecutionContext.InferType(value);
-                if (incoming == ValueType.Int && vt == ValueType.Struct && value is int p && context.GetHeapObjectType(p) == ValueType.Struct)
-                    incoming = ValueType.Struct;
+                if (incoming == ValueType.Int && value is int p && p >= context.StackSize && p < context.StackSize + context.MemoryUsed)
+                {
+                    var heapT = context.GetHeapObjectType(p);
+                    if (heapT == vt || (vt == ValueType.Object && heapT != ValueType.String))
+                        incoming = heapT;
+                }
                 if (incoming != context.GetHeapObjectType(basePtr))
                     throw new ApplicationException($"Type missmatch during indexing: {context.GetHeapObjectType(basePtr)} -> {ExecutionContext.InferType(value)}");
 
@@ -7111,7 +7307,7 @@
                 int length = ctx.GetArrayLength(basePtr);
 
                 if (index < 0 || index >= length)
-                    throw new IndexOutOfRangeException($"index {index} length {length}");
+                    throw new IndexOutOfRangeException($"Index out of range: index {index} length {length}");
 
                 return basePtr + index * elemSize;
             }
@@ -7897,11 +8093,86 @@
         }
         public class UnresolvedReferenceNode : AstNode
         {
+            public AstNode? Target { get; }
             public List<string> Parts { get; }
             public bool IsNullConditional { get; }
-            public UnresolvedReferenceNode(List<string> parts, bool isNullConditional = false) { Parts = parts; IsNullConditional = isNullConditional; }
+            public UnresolvedReferenceNode(List<string> parts, bool isNullConditional = false, AstNode? root = null) 
+            { Target = root; Parts = parts; IsNullConditional = isNullConditional; }
             public override object Evaluate(ExecutionContext context)
             {
+                if (Target is not null)
+                {
+                    context.Check();
+                    object? current = Target.Evaluate(context);
+                    for (int i = 0; i < Parts.Count; i++)
+                    {
+                        if (current is null)
+                        {
+                            if (IsNullConditional) return null!;
+                            throw new ApplicationException("Null reference");
+                        }
+                        string member = Parts[i];
+                        if (current is string s) current = context.PackReference(s, ValueType.String);
+                        if (current is int ptr && ptr >= context.StackSize && ptr < context.StackSize + context.MemoryUsed)
+                        {
+                            var ht = context.GetHeapObjectType(ptr);
+
+                            if (ht == ValueType.Struct)
+                            {
+                                int off = context.GetStructFieldOffset(ptr, member, out var vt) + 1;
+                                current = IsReferenceType(vt)
+                                         ? context.DerefReference(ptr + off, vt)!
+                                         : context.ReadFromStack(ptr + off, vt);
+                                continue;
+                            }
+                            if (ht == ValueType.Tuple)
+                            {
+                                var items = context.ReadTuple(ptr);
+                                if (member.Length >= 5 && member.StartsWith("Item", StringComparison.Ordinal)
+                                    && int.TryParse(member.AsSpan(4), out int idx) && idx >= 1 && idx <= items.Count)
+                                {
+                                    current = items[idx - 1].value!;
+                                    continue;
+                                }
+                                bool found = false;
+                                for (int k = 0; k < items.Count; k++)
+                                {
+                                    if (items[k].namePtr >= context.StackSize)
+                                    {
+                                        string name = context.ReadHeapString(items[k].namePtr);
+                                        if (string.Equals(name, member, StringComparison.Ordinal))
+                                        {
+                                            current = items[k].value!;
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!found) throw new ApplicationException($"Tuple has no member '{member}'");
+                                continue;
+                            }
+                            if (context.NativeFunctions.ContainsKey(member))
+                            {
+                                var call = new CallNode(member, new AstNode[] { new LiteralNode(ptr) });
+                                current = call.Evaluate(context);
+                                continue;
+                            }
+
+                            throw new ApplicationException($"No native '{member}' for expression");
+                        }
+                        else
+                        {
+                            if (context.NativeFunctions.ContainsKey(member))
+                            {
+                                var call = new CallNode(member, new AstNode[] { new LiteralNode(current) });
+                                current = call.Evaluate(context);
+                                continue;
+                            }
+                            throw new ApplicationException($"Member '{member}' is not available on value");
+                        }
+                    }
+                    return current!;
+                }
                 if (Parts.Count >= 2)
                 {
                     string varName = Parts[0];
@@ -8146,8 +8417,7 @@
                             if (f.ParamsIndex >= 0 && string.Equals(nm, f.ParamNames[f.ParamsIndex], StringComparison.Ordinal))
                             { error = "Passing 'params' by name is not supported."; return false; }
 
-                            int pi = Array.FindIndex(f.ParamNames, 0, prefixCount,
-                                                     p => string.Equals(p, nm, StringComparison.Ordinal));
+                            int pi = Array.FindIndex(f.ParamNames, 0, prefixCount, p => string.Equals(p, nm, StringComparison.Ordinal));
                             if (pi < 0) { error = $"No parameter named '{nm}'."; return false; }
                             if (fixedMap.ContainsKey(pi)) { error = $"Parameter '{nm}' specified multiple times."; return false; }
 
