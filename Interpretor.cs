@@ -1,6 +1,7 @@
 ﻿namespace Interpretor
 {
     using System;
+    using System.Collections.Generic;
     using System.Globalization;
     using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
@@ -121,24 +122,76 @@
 
                 char current = _text[_position];
 
-                bool dotStartsNumber = current == '.' && _position > 0 && char.IsDigit(_text[_position - 1])
-                    && _position + 1 < _text.Length && char.IsDigit(_text[_position + 1]);
                 //Number literal (int/double)
-                if (char.IsDigit(current) || dotStartsNumber)
+                if (char.IsDigit(current))
                 {
+                    static bool IsHexDigit(char c) => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
                     int start = _position;
-                    while (_position < _text.Length)
+                    if (current == '0' && _position + 1 < _text.Length 
+                        && (_text[_position + 1] == 'x' || _text[_position + 1] == 'X'))
                     {
-                        char c = _text[_position];
-                        if (char.IsDigit(c)) { _position++; continue; }
-                        if (c == '.')
-                        {
-                            if (_position + 1 < _text.Length && _text[_position + 1] == '.')
-                                break;
+                        _position += 2;
+                        int digitsStart = _position;
+                        while (_position < _text.Length && (IsHexDigit(_text[_position]) || _text[_position] == '_'))
                             _position++;
-                            continue;
+                        int sufStart = _position;
+                        if (_position < _text.Length)
+                        {
+                            char c1 = _text[_position];
+                            char c2 = _position + 1 < _text.Length ? _text[_position + 1] : '\0';
+                            if ((c1 == 'u' || c1 == 'U' || c1 == 'l' || c1 == 'L') 
+                                && (c2 == 'u' || c2 == 'U' || c2 == 'l' || c2 == 'L') 
+                                && char.ToLowerInvariant(c1) != char.ToLowerInvariant(c2))
+                            {
+                                _position += 2;
+                            }
+                            else if (c1 == 'u' || c1 == 'U' || c1 == 'l' || c1 == 'L')
+                            {
+                                _position += 1;
+                            }
                         }
-                        break;
+                        CurrentTokenText = _text.Substring(start, _position - start);
+                        CurrentTokenType = Ast.TokenType.Number;
+                        return;
+                    }
+                    while (_position < _text.Length && (char.IsDigit(_text[_position]) || _text[_position] == '_')) _position++;
+                    if (_position < _text.Length && _text[_position] == '.' && !(_position + 1 < _text.Length && _text[_position + 1] == '.'))
+                    {
+                        _position++; //skip .
+                        while (_position < _text.Length && (char.IsDigit(_text[_position]) || _text[_position] == '_')) _position++;
+                    }
+                    if (_position < _text.Length && (_text[_position] == 'e' || _text[_position] == 'E'))
+                    {
+                        int save = _position;
+                        _position++;
+                        if (_position < _text.Length && (_text[_position] == '+' || _text[_position] == '-'))
+                            _position++;
+                        bool any = false;
+                        while (_position < _text.Length && (char.IsDigit(_text[_position]) || _text[_position] == '_'))
+                        { 
+                            _position++; 
+                            any = true;
+                        }
+                        if (!any) _position = save;
+                    }
+                    if (_position < _text.Length)
+                    {
+                        char c1 = _text[_position];
+                        char c2 = _position + 1 < _text.Length ? _text[_position + 1] : '\0';
+                        if (c1 is 'f' or 'F' or 'd' or 'D' or 'm' or 'M')
+                        {
+                            _position++;
+                        }
+                        else if ((c1 == 'u' || c1 == 'U' || c1 == 'l' || c1 == 'L') 
+                            && (c2 == 'u' || c2 == 'U' || c2 == 'l' || c2 == 'L') 
+                            && char.ToLowerInvariant(c1) != char.ToLowerInvariant(c2))
+                        {
+                            _position += 2;
+                        }
+                        else if (c1 == 'u' || c1 == 'U' || c1 == 'l' || c1 == 'L')
+                        {
+                            _position += 1;
+                        }
                     }
                     CurrentTokenText = _text.Substring(start, _position - start);
                     CurrentTokenType = Ast.TokenType.Number;
@@ -1562,26 +1615,8 @@
                 case Ast.TokenType.Number:
                     {
                         string num = _lexer.CurrentTokenText; _lexer.NextToken();
-                        if (num.Contains('.')) return new Ast.LiteralNode(double.Parse(num, CultureInfo.InvariantCulture));
-                        if (ulong.TryParse(num, out var ulongVal))
-                        {
-                            if (ulongVal <= int.MaxValue)
-                                return new Ast.LiteralNode((int)ulongVal);
-                            else if (ulongVal <= uint.MaxValue)
-                                return new Ast.LiteralNode((uint)ulongVal);
-                            else if (ulongVal <= long.MaxValue)
-                                return new Ast.LiteralNode((long)ulongVal);
-                            else
-                                return new Ast.LiteralNode(ulongVal);
-                        }
-                        if (long.TryParse(num, out var longVal))
-                        {
-                            if (longVal >= int.MinValue)
-                                return new Ast.LiteralNode((int)longVal);
-                            else if (longVal >= long.MinValue)
-                                return new Ast.LiteralNode(longVal);
-                        }
-                        return new Ast.LiteralNode(int.Parse(num));
+                        object value = ParseNumericLiteral(num);
+                        return new Ast.LiteralNode(value);
                     }
                 case Ast.TokenType.Char:
                     {
@@ -1852,8 +1887,6 @@
 
             }
 
-
-
             throw new ApplicationException($"Unexpected token in expression: {_lexer.CurrentTokenType}: {_lexer.CurrentTokenText}");
         }
         private Ast.AstNode ParseInterpolatedString(string content)
@@ -1894,6 +1927,159 @@
                 node = new Ast.BinOpNode(node, Ast.OperatorToken.Plus, parts[k]);
 
             return node;
+        }
+        private static object ParseNumericLiteral(string raw)
+        {
+            ReadOnlySpan<char> s = raw.AsSpan();
+            string? suffix = null;
+            if (s.Length >= 1)
+            {
+                char last = s[^1];
+                if (last is 'f' or 'F' or 'd' or 'D' or 'm' or 'M')
+                {
+                    suffix = last.ToString();
+                    s = s[..^1];
+                }
+                else if (s.Length >= 2)
+                {
+                    char a = s[^2], b = s[^1];
+                    if ((a is 'u' or 'U' or 'l' or 'L') && (b is 'u' or 'U' or 'l' or 'L') && char.ToLowerInvariant(a) != char.ToLowerInvariant(b))
+                    { suffix = "ul"; s = s[..^2]; }
+                    else if (b is 'u' or 'U' or 'l' or 'L')
+                    { suffix = char.ToLowerInvariant(b).ToString(); s = s[..^1]; }
+                }
+                else if (last is 'u' or 'U' or 'l' or 'L')
+                {
+                    suffix = char.ToLowerInvariant(last).ToString();
+                    s = s[..^1];
+                }
+            }
+            if (s.Length >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+            {
+                var digits = s[2..];
+                EnsureValidDigitsWithUnderscores(digits, IsHexDigit, "hex", raw);
+
+                string cleaned = digits.ToString().Replace("_", "");
+                if (!ulong.TryParse(cleaned, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var ul))
+                    throw new ApplicationException($"Invalid hex literal '{raw}'");
+
+                return CoerceInteger(ul, suffix);
+            }
+            int eIdx = IndexOfAny(s, 'e', 'E');
+            ReadOnlySpan<char> mantissa = eIdx < 0 ? s : s[..eIdx];
+            ReadOnlySpan<char> expPart = eIdx < 0 ? default : s[(eIdx + 1)..];
+            bool expNegative = false;
+            if (!expPart.IsEmpty)
+            {
+                if (expPart[0] == '+' || expPart[0] == '-')
+                {
+                    expNegative = expPart[0] == '-';
+                    expPart = expPart[1..];
+                }
+                EnsureValidDigitsWithUnderscores(expPart, char.IsDigit, "exponent", raw);
+            }
+            int dotIdx = IndexOf(mantissa, '.');
+            ReadOnlySpan<char> intPart = dotIdx < 0 ? mantissa : mantissa[..dotIdx];
+            ReadOnlySpan<char> fracPart = dotIdx < 0 ? default : mantissa[(dotIdx + 1)..];
+
+            bool hasDot = dotIdx >= 0;
+            bool hasExp = eIdx >= 0;
+            if (!intPart.IsEmpty) EnsureValidDigitsWithUnderscores(intPart, char.IsDigit, "integer", raw);
+            if (!fracPart.IsEmpty) EnsureValidDigitsWithUnderscores(fracPart, char.IsDigit, "fraction", raw);
+
+            if ((intPart.IsEmpty && fracPart.IsEmpty) || (hasExp && expPart.IsEmpty))
+                throw new ApplicationException($"Malformed number literal '{raw}'");
+            string intClean = intPart.IsEmpty ? "0" : intPart.ToString().Replace("_", "");
+            string fracClean = fracPart.IsEmpty ? "" : fracPart.ToString().Replace("_", "");
+            string expClean = expPart.IsEmpty ? "" : (expNegative ? "-" : "") + expPart.ToString().Replace("_", "");
+
+            bool forceFloat = suffix is "f" or "F";
+            bool forceDouble = suffix is "d" or "D" || (suffix is null && (hasDot || hasExp));
+            bool forceDecimal = suffix is "m" or "M";
+            if (forceDecimal)
+            {
+                if (hasExp)
+                    throw new ApplicationException($"Decimal literal cannot have exponent: '{raw}'");
+                string dec = fracClean.Length == 0 ? intClean : (intClean + "." + fracClean);
+                if (!decimal.TryParse(dec, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var m))
+                    throw new ApplicationException($"Invalid decimal literal '{raw}'");
+                return m;
+            }
+            if (forceFloat)
+            {
+                string sfloat = BuildFloatString(intClean, fracClean, expClean);
+                if (!float.TryParse(sfloat, NumberStyles.Float, CultureInfo.InvariantCulture, out var f))
+                    throw new ApplicationException($"Invalid float literal '{raw}'");
+                return f;
+            }
+
+            if (forceDouble || hasDot || hasExp)
+            {
+                string sdouble = BuildFloatString(intClean, fracClean, expClean);
+                if (!double.TryParse(sdouble, NumberStyles.Float, CultureInfo.InvariantCulture, out var d))
+                    throw new ApplicationException($"Invalid double literal '{raw}'");
+                return d;
+            }
+            if (!ulong.TryParse(intClean, NumberStyles.None, CultureInfo.InvariantCulture, out var ui))
+                throw new ApplicationException($"Invalid integer literal '{raw}'");
+            return CoerceInteger(ui, suffix);
+
+            static bool Contains(ReadOnlySpan<char> span, char c)
+            { for (int i = 0; i < span.Length; i++) if (span[i] == c) return true; return false; }
+            static int IndexOf(ReadOnlySpan<char> span, char c)
+            { for (int i = 0; i < span.Length; i++) if (span[i] == c) return i; return -1; }
+            static int IndexOfAny(ReadOnlySpan<char> span, char a, char b)
+            { for (int i = 0; i < span.Length; i++) { var ch = span[i]; if (ch == a || ch == b) return i; } return -1; }
+            static bool IsHexDigit(char c) => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            static void EnsureValidDigitsWithUnderscores(ReadOnlySpan<char> part, Func<char, bool> isDigit, string where, string rawFull)
+            {
+                if (part.IsEmpty) return;
+                if (part[0] == '_' || part[^1] == '_')
+                    throw new ApplicationException($"Underscore cannot be at the start/end of {where} part in '{rawFull}'");
+                bool prevDigit = false, prevUnderscore = false;
+                for (int i = 0; i < part.Length; i++)
+                {
+                    char c = part[i];
+                    if (c == '_')
+                    {
+                        if (!prevDigit) throw new ApplicationException($"Underscore must be between digits in '{rawFull}'");
+                        prevDigit = false; prevUnderscore = true;
+                        continue;
+                    }
+                    if (!isDigit(c)) throw new ApplicationException($"Invalid digit '{c}' in {where} part of '{rawFull}'");
+                    if (prevUnderscore == true)
+                        prevUnderscore = false;
+                    prevDigit = true;
+                }
+            }
+
+            static string BuildFloatString(string intClean, string fracClean, string expClean)
+            {
+                var sb = new System.Text.StringBuilder(intClean);
+                if (fracClean.Length > 0) { sb.Append('.'); sb.Append(fracClean); }
+                if (expClean.Length > 0) { sb.Append('e'); sb.Append(expClean); }
+                return sb.ToString();
+            }
+            static object CoerceInteger(ulong ul, string? sfx)
+            {
+                if (sfx is not null)
+                {
+                    switch (sfx.ToLowerInvariant())
+                    {
+                        case "u":
+                            if (ul > uint.MaxValue) throw new OverflowException("Value does not fit into uint");
+                            return (uint)ul;
+                        case "l":
+                            checked { return (long)ul; }
+                        case "ul":
+                            return ul;
+                    }
+                }
+                if (ul <= int.MaxValue) return (int)ul;
+                if (ul <= uint.MaxValue) return (uint)ul;
+                if (ul <= long.MaxValue) return (long)ul;
+                return ul;
+            }
         }
         #endregion
         #region Function parser
@@ -3688,8 +3874,36 @@
                     throw new ArgumentOutOfRangeException("nullptr");
 
                 var elemType = GetHeapObjectType(ptr);
-                if (elemType != type)
-                    throw new ArgumentException("Type missmatch while adding to array");
+                if (type != elemType)
+                {
+                    if (IsReferenceType(elemType))
+                    {
+                        if (element is int p)
+                        {
+                            if (p > 0 && elemType != ValueType.Object && p >= StackSize && p < StackSize + MemoryUsed)
+                            {
+                                var heapType = GetHeapObjectType(p);
+                                if (heapType != elemType)
+                                    throw new ArgumentException($"Type mismatch while adding pointer to {heapType} to {elemType}");
+                            }
+                            else if (elemType == ValueType.Object)
+                            {
+                                element = PackReference(element!, ValueType.Object);
+                                type = ValueType.Int;
+                            }
+                            else if (elemType == ValueType.String && element is string)
+                            {
+                                //ok
+                            }
+                            else throw new ArgumentException($"Type mismatch while adding {type} to {elemType}");
+                        }
+                    }
+                    else
+                    {
+                        element = Cast(element, elemType);
+                        type = elemType;
+                    }
+                }
 
                 int elemSize = GetTypeSize(elemType);
                 int oldBytes = GetHeapObjectLength(ptr);
@@ -3697,8 +3911,7 @@
                 int needBytes = checked((oldLength + 1) * elemSize);
 
                 int newPtr = Malloc(needBytes, elemType, isArray: true);
-                _memory.AsSpan(ptr, oldBytes)
-                       .CopyTo(_memory.AsSpan(newPtr, oldBytes));
+                _memory.AsSpan(ptr, oldBytes).CopyTo(_memory.AsSpan(newPtr, oldBytes));
                 _memory.AsSpan(newPtr + oldBytes, needBytes - oldBytes).Clear();
 
 
@@ -3726,9 +3939,37 @@
 
                 if (index < 0 || index > length)
                     throw new ArgumentOutOfRangeException(nameof(index));
-                var incomingType = InferType(element);
-                if (incomingType != elemType)
-                    throw new ArgumentException($"Type mismatch while inserting into array, adding {incomingType} to {elemType}");
+                var type = InferType(element);
+                if (type != elemType)
+                {
+                    if (IsReferenceType(elemType))
+                    {
+                        if (element is int p)
+                        {
+                            if (p > 0 && elemType != ValueType.Object && p >= StackSize && p < StackSize + MemoryUsed)
+                            {
+                                var heapType = GetHeapObjectType(p);
+                                if (heapType != elemType)
+                                    throw new ArgumentException($"Type mismatch while adding pointer to {heapType} to {elemType}");
+                            }
+                            else if (elemType == ValueType.Object)
+                            {
+                                element = PackReference(element!, ValueType.Object);
+                                type = ValueType.Int;
+                            }
+                            else if (elemType == ValueType.String && element is string)
+                            {
+                                //ok
+                            }
+                            else throw new ArgumentException($"Type mismatch while adding {type} to {elemType}");
+                        }
+                    }
+                    else
+                    {
+                        element = Cast(element, elemType);
+                        type = elemType;
+                    }
+                }
 
                 int needBytes = checked((length + 1) * elemSize);
                 int newPtr = Malloc(needBytes, elemType, isArray: true);
@@ -3737,8 +3978,7 @@
                 ReadOnlySpan<byte> src = GetSourceBytes(element);
                 WriteBytes(newPtr + index * elemSize, src);
                 int tailBytes = (length - index) * elemSize;
-                _memory.AsSpan(ptr + index * elemSize, tailBytes)
-                       .CopyTo(_memory.AsSpan(newPtr + (index + 1) * elemSize, tailBytes));
+                _memory.AsSpan(ptr + index * elemSize, tailBytes).CopyTo(_memory.AsSpan(newPtr + (index + 1) * elemSize, tailBytes));
 
                 Free(ptr);
                 return newPtr;
@@ -4668,7 +4908,11 @@
                 }
             }
             #region Seialization
-
+            static ReadOnlySpan<byte> TRUEu8 => new byte[] { (byte)'t', (byte)'r', (byte)'u', (byte)'e' };
+            static ReadOnlySpan<byte> FALSEu8 => new byte[] { (byte)'f', (byte)'a', (byte)'l', (byte)'s', (byte)'e' };
+            static ReadOnlySpan<byte> NULLu8 => new byte[] { (byte)'n', (byte)'u', (byte)'l', (byte)'l' };
+            static ReadOnlySpan<byte> TUPLEu8 => new byte[] { (byte)'$', (byte)'t', (byte)'u', (byte)'p', (byte)'l', (byte)'e' };
+            static ReadOnlySpan<byte> NAMESu8 => new byte[] { (byte)'$', (byte)'n', (byte)'a', (byte)'m', (byte)'e', (byte)'s' };
             public int SerializeJson(int anyPtr, int depthLimit = 8)
             {
                 const int MaxOutBytes = 256 * 1024;
@@ -4720,8 +4964,9 @@
                     for (int i = 0; i < raw.Length; i++) PutEscByte(raw[i]);
                     Ensure(1); buf[w++] = QUOTE;
                 }
+
                 static bool IsRef(Ast.ValueType vt) => Ast.IsReferenceType(vt);
-                void PutBool(bool v) { ReadOnlySpan<byte> s = v ? "true"u8 : "false"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
+                void PutBool(bool v) { var s = v ? TRUEu8 : FALSEu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
                 void PutInt32(int v) { Ensure(11); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c); w += c; }
                 void PutUInt32(uint v) { Ensure(11); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c); w += c; }
                 void PutInt64(long v) { Ensure(20); System.Buffers.Text.Utf8Formatter.TryFormat(v, buf.AsSpan(w), out int c); w += c; }
@@ -4745,20 +4990,20 @@
                 }
                 void PutStringFromHeap(int ptr)
                 {
-                    if (ptr < StackSize) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    if (ptr < StackSize) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
                     var raw = HeapSpan(ptr);
                     PutQuotedUtf8(raw);
                 }
                 void PutNullableFromHeap(int ptr)
                 {
-                    if (ptr < StackSize) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    if (ptr < StackSize) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
                     var baseT = (Ast.ValueType)mem[ptr];
                     int valAddr = ptr + 1;
                     PutValue(baseT, valAddr, isHeapPayload: true, depth: 0);
                 }
                 void PutTupleFromHeap(int ptr, int depth)
                 {
-                    if (depth <= 0 || ptr < StackSize) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    if (depth <= 0 || ptr < StackSize) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
                     var items = ReadTuple(ptr);
                     bool anyNames = false;
                     int count = 0;
@@ -4772,7 +5017,7 @@
                     }
                     void PutTupleValue(Ast.ValueType et, object? v, int d)
                     {
-                        if (v is null) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                        if (v is null) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
 
                         if (Ast.IsReferenceType(et))
                         {
@@ -4790,7 +5035,7 @@
                                     if (ht == Ast.ValueType.Array) { PutArrayFromHeap(hp, d - 1); return; }
                                 }
                             }
-                            var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return;
+                            var sp = NULLu8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return;
                         }
 
                         // value types
@@ -4824,7 +5069,7 @@
                     {
                         Ensure(1); buf[w++] = LBR;
                         // "$tuple"
-                        Ensure(1); buf[w++] = QUOTE; var k1 = "$tuple"u8; Ensure(k1.Length); k1.CopyTo(buf.AsSpan(w)); w += k1.Length; Ensure(1); buf[w++] = QUOTE; Ensure(1); buf[w++] = COL;
+                        Ensure(1); buf[w++] = QUOTE; var k1 = TUPLEu8; Ensure(k1.Length); k1.CopyTo(buf.AsSpan(w)); w += k1.Length; Ensure(1); buf[w++] = QUOTE; Ensure(1); buf[w++] = COL;
                         Ensure(1); buf[w++] = LSB;
                         int idx = 0;
                         var again = ReadTuple(ptr);
@@ -4836,7 +5081,7 @@
                         Ensure(1); buf[w++] = RSB;
                         // "$names"
                         Ensure(1); buf[w++] = COM;
-                        Ensure(1); buf[w++] = QUOTE; var k2 = "$names"u8; Ensure(k2.Length); k2.CopyTo(buf.AsSpan(w)); w += k2.Length; Ensure(1); buf[w++] = QUOTE; Ensure(1); buf[w++] = COL;
+                        Ensure(1); buf[w++] = QUOTE; var k2 = NAMESu8; Ensure(k2.Length); k2.CopyTo(buf.AsSpan(w)); w += k2.Length; Ensure(1); buf[w++] = QUOTE; Ensure(1); buf[w++] = COL;
                         Ensure(1); buf[w++] = LSB;
                         idx = 0;
                         foreach (var (_, __, namePtr) in ReadTuple(ptr))
@@ -4860,8 +5105,8 @@
                         if (len < 0 || len > MaxArrayElements) return false;
                         return true;
                     }
-                    if (depth <= 0) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
-                    if (ptr < StackSize || !GetArrayMeta(ptr, out int len)) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    if (depth <= 0) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                    if (ptr < StackSize || !GetArrayMeta(ptr, out int len)) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
                     var et = GetHeapObjectType(ptr);
                     Ensure(1); buf[w++] = LSB;
                     for (int i = 0; i < len; i++)
@@ -4880,12 +5125,12 @@
                             long off = (long)i * sizeof(int);
                             if (off > int.MaxValue) throw new ApplicationException("Serialization Limit Exceeded");
                             int h = BitConverter.ToInt32(mem, (ptr + (int)off));
-                            if (h <= 0) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; continue; }
+                            if (h <= 0) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; continue; }
                             if (et == Ast.ValueType.String) PutStringFromHeap(h);
                             else if (et == Ast.ValueType.Struct) PutStructInstance(h, depth - 1);
                             else if (et == Ast.ValueType.Array) PutArrayFromHeap(h, depth - 1);
                             else if (et == Ast.ValueType.Nullable) PutNullableFromHeap(h);
-                            else { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
+                            else { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
                         }
                     }
                     Ensure(1); buf[w++] = RSB;
@@ -4895,12 +5140,12 @@
                     if (Ast.IsReferenceType(vt))
                     {
                         int h = BitConverter.ToInt32(mem, addr);
-                        if (h <= 0) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
+                        if (h <= 0) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; return; }
                         if (vt == Ast.ValueType.String) { PutStringFromHeap(h); return; }
                         if (vt == Ast.ValueType.Struct) { PutStructInstance(h, depth - 1); return; }
                         if (vt == Ast.ValueType.Array) { PutArrayFromHeap(h, depth - 1); return; }
                         if (vt == Ast.ValueType.Nullable) { PutNullableFromHeap(h); return; }
-                        var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length;
+                        var sp = NULLu8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length;
                         return;
                     }
                     switch (vt)
@@ -4920,16 +5165,16 @@
                         case Ast.ValueType.Double: PutDouble(BitConverter.ToDouble(mem, addr)); break;
                         case Ast.ValueType.Char: PutChar(BitConverter.ToUInt16(mem, addr)); break;
                         case Ast.ValueType.Enum: PutInt32(BitConverter.ToInt32(mem, addr)); break;
-                        default: var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; break;
+                        default: var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; break;
                     }
                 }
                 void PutStructInstance(int instPtr, int depth)
                 {
-                    if (depth <= 0) { var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
-                    if (instPtr < StackSize) { var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
+                    if (depth <= 0) { var sp = NULLu8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
+                    if (instPtr < StackSize) { var sp = NULLu8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
 
                     int sigPtr = BitConverter.ToInt32(mem, instPtr);
-                    if (sigPtr < StackSize) { var sp = "null"u8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
+                    if (sigPtr < StackSize) { var sp = NULLu8; Ensure(sp.Length); sp.CopyTo(buf.AsSpan(w)); w += sp.Length; return; }
                     var sig = HeapSpan(sigPtr);
                     int sigLen = sig.Length;
                     int s = 0;
@@ -4966,7 +5211,7 @@
                 }
                 depthLimit = depthLimit < 0 ? 0 : (depthLimit > HardMaxDepth ? HardMaxDepth : depthLimit);
                 int inst = NormalizeInstancePtr(anyPtr);
-                if (inst < 0) { var s = "null"u8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
+                if (inst < 0) { var s = NULLu8; Ensure(s.Length); s.CopyTo(buf.AsSpan(w)); w += s.Length; }
                 else
                 {
                     var t = GetHeapObjectType(inst);
@@ -5760,9 +6005,9 @@
             this.Context.RegisterNative("DateTime.UtcNow.Hour", () => { return DateTime.UtcNow.Hour; });
             this.Context.RegisterNative("DateTime.UtcNow.Minute", () => { return DateTime.UtcNow.Minute; });
             this.Context.RegisterNative("DateTime.UtcNow.Second", () => { return DateTime.UtcNow.Second; });
-            this.Context.RegisterNative("DateTime.UtcNow.Microsecond", () => { return DateTime.UtcNow.Microsecond; });
+            this.Context.RegisterNative("DateTime.UtcNow.Microsecond", () => (int)((DateTime.UtcNow.Ticks % TimeSpan.TicksPerMillisecond) / 10));
             this.Context.RegisterNative("DateTime.UtcNow.Millisecond", () => { return DateTime.UtcNow.Millisecond; });
-            this.Context.RegisterNative("DateTime.UtcNow.Nanosecond", () => { return DateTime.UtcNow.Nanosecond; });
+            this.Context.RegisterNative("DateTime.UtcNow.Nanosecond", () => (int)((DateTime.UtcNow.Ticks % 10) * 100));
             this.Context.RegisterNative("DateTime.UtcNow.Ticks", () => { return DateTime.UtcNow.Ticks; });
             this.Context.RegisterNative("DateTime.Now", () => { return DateTime.Now; });
             this.Context.RegisterNative("DateTime.Now.Year", () => { return DateTime.Now.Year; });
@@ -5771,9 +6016,9 @@
             this.Context.RegisterNative("DateTime.Now.Hour", () => { return DateTime.Now.Hour; });
             this.Context.RegisterNative("DateTime.Now.Minute", () => { return DateTime.Now.Minute; });
             this.Context.RegisterNative("DateTime.Now.Second", () => { return DateTime.Now.Second; });
-            this.Context.RegisterNative("DateTime.Now.Microsecond", () => { return DateTime.Now.Microsecond; });
+            this.Context.RegisterNative("DateTime.Now.Microsecond", () => (int)((DateTime.Now.Ticks % TimeSpan.TicksPerMillisecond) / 10));
             this.Context.RegisterNative("DateTime.Now.Millisecond", () => { return DateTime.Now.Millisecond; });
-            this.Context.RegisterNative("DateTime.Now.Nanosecond", () => { return DateTime.Now.Nanosecond; });
+            this.Context.RegisterNative("DateTime.Now.Nanosecond", () => (int)((DateTime.Now.Ticks % 10) * 100));
             this.Context.RegisterNative("DateTime.Now.Ticks", () => { return DateTime.Now.Ticks; });
             this.Context.RegisterNative("DateTime.Today", () => { return DateTime.Today; });
             this.Context.RegisterNative("DateTime.Parse", (string s) => DateTime.Parse(s, CultureInfo.InvariantCulture));
@@ -5985,10 +6230,11 @@
             this.Context.RegisterNative("GetMemoryDump", () => { var mem = Context.PrintMemory(); return mem; });
             this.Context.RegisterNative("GetMemoryDump", (int len) => { var mem = Context.PrintMemory(); return mem.Length > len ? mem.Substring(0, len) : mem; });
             this.Context.RegisterNative("GC.Collect", () => { Context.CollectGarbage(); });
+            this.Context.RegisterNative("ValidAddress", (int addr) => { return addr >= Context.StackSize && addr < Context.StackSize + Context.MemoryUsed; });
 
         }
         #region Helpers
-        static string FormatExceptionForUser(Exception ex, int frameLimit = 3, int innerLimit = 1)
+        public static string FormatExceptionForUser(Exception ex, int frameLimit = 3, int innerLimit = 1)
         {
             for (int i = 0; i < innerLimit; i++)
             {
@@ -6665,6 +6911,7 @@
                 OperatorToken.NotEqual => l != r,
                 OperatorToken.And => l && r,
                 OperatorToken.Or => l || r,
+                OperatorToken.BitXor => l ^ r,
                 _ => throw new ApplicationException($"Unsupported operation {op} for bool type")
             };
             public static object EvaluateBinary<T>(T l, T r, OperatorToken op) where T : struct, IConvertible
@@ -6747,8 +6994,7 @@
                 OperatorToken.Minus or OperatorToken.MinusEqual => l - r,
                 OperatorToken.Multiply or OperatorToken.MultiplyEqual => l * r,
                 OperatorToken.Divide or OperatorToken.DivideEqual => l / r,
-                OperatorToken.Module => l % r,
-                OperatorToken.ModuleEqual => l % r,
+                OperatorToken.Module or OperatorToken.ModuleEqual => l % r,
                 OperatorToken.Greater => l > r,
                 OperatorToken.Less => l < r,
                 OperatorToken.GreaterOrEqual => l >= r,
@@ -6756,17 +7002,12 @@
                 OperatorToken.Equal => l == r,
                 OperatorToken.NotEqual => l != r,
                 OperatorToken.Equals => r,
-                OperatorToken.RightShift => (int)l >> (int)r,
-                OperatorToken.RightShiftEqual => (int)l >> (int)r,
-                OperatorToken.LeftShift => (int)l << (int)r,
-                OperatorToken.LeftShiftEqual => (int)l << (int)r,
-                OperatorToken.UnsignedRightShift => (int)l >>> (int)r,
-                OperatorToken.UnsignedRightShiftEqual => (int)l >>> (int)r,
-                OperatorToken.BitXorEqual => l ^ r,
-                OperatorToken.BitOr => l | r,
-                OperatorToken.BitOrEqual => l | r,
-                OperatorToken.BitAnd => l & r,
-                OperatorToken.BitAndEqual => l & r,
+                OperatorToken.RightShift or OperatorToken.RightShiftEqual => (int)l >> (int)r,
+                OperatorToken.LeftShift or OperatorToken.LeftShiftEqual => (int)l << (int)r,
+                OperatorToken.UnsignedRightShift or OperatorToken.UnsignedRightShiftEqual => (int)l >>> (int)r,
+                OperatorToken.BitXor or OperatorToken.BitXorEqual => l ^ r,
+                OperatorToken.BitOr or OperatorToken.BitOrEqual => l | r,
+                OperatorToken.BitAnd or OperatorToken.BitAndEqual => l & r,
                 OperatorToken.Pow => Convert.ToInt64(Math.Pow(l, r)),
                 _ => throw new ApplicationException($"Unsupported op {op} for Int64")
             };
@@ -8792,7 +9033,12 @@
             public readonly string[] Modifiers;
             public readonly Initializer? CtorInitializer;
             public int ParamsIndex = -1;
-            public readonly record struct Initializer(string Kind, Ast.AstNode[] Args);
+            public readonly struct Initializer
+            {
+                public string Kind { get; }
+                public Ast.AstNode[] Args { get; }
+                public Initializer(string kind, Ast.AstNode[] args) { Kind = kind; Args = args; }
+            }
 
             public ConstructorDeclarationNode(string structName, string[] paramNames, Ast.ValueType[] paramTypes, Ast.AstNode?[] defaultValues,
                 Ast.AstNode body, IEnumerable<string>? modifiers = null, Initializer? initializer = null, int paramsIndex = -1)
