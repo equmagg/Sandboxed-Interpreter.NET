@@ -102,7 +102,7 @@
             "if", "goto", "for", "while", "do", "void","return", "break","continue","try","catch", "switch", "case", "finally" , "var", "default", "throw", "else", "new", "foreach", "in",
             "using", "struct", "class", "checked", "unchecked", "out", "const", "enum", "ref", "private", "public", "protected", "static", "abstract", "interface", "delegate", "as", "base",
             "internal", "unsafe", "sealed", "virtual", "override", "partial", "readonly", "params", "lock", "implicit", "explicit", "fixed", "extern", "operator", "namespace", "event", "is",
-            "and", "or", "not", "async", "await", "volatile", "yield", "record", "where", "nameof", "when", "unmanaged", "notnull" };
+            "and", "or", "not", "async", "await", "volatile", "yield", "record", "where", "nameof", "when", "unmanaged", "notnull", "global" };
             public void ResetCurrent(int pos, Ast.TokenType token, string text)
             {
                 _position = pos;
@@ -127,8 +127,7 @@
                 {
                     static bool IsHexDigit(char c) => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
                     int start = _position;
-                    if (current == '0' && _position + 1 < _text.Length 
-                        && (_text[_position + 1] == 'x' || _text[_position + 1] == 'X'))
+                    if (current == '0' && _position + 1 < _text.Length && (_text[_position + 1] == 'x' || _text[_position + 1] == 'X'))
                     {
                         _position += 2;
                         int digitsStart = _position;
@@ -154,7 +153,35 @@
                         CurrentTokenType = Ast.TokenType.Number;
                         return;
                     }
-                    while (_position < _text.Length && (char.IsDigit(_text[_position]) || _text[_position] == '_')) _position++;
+                    if (current == '0' && _position + 1 < _text.Length && (_text[_position + 1] == 'b' || _text[_position + 1] == 'B'))
+                    {
+                        _position += 2;
+                        while (_position < _text.Length)
+                        {
+                            char c = _text[_position];
+                            if (c == '0' || c == '1' || c == '_') { _position++; continue; }
+                            break;
+                        }
+                        if (_position < _text.Length)
+                        {
+                            char c1 = _text[_position];
+                            char c2 = _position + 1 < _text.Length ? _text[_position + 1] : '\0';
+                            if ((c1 == 'u' || c1 == 'U' || c1 == 'l' || c1 == 'L')
+                                && (c2 == 'u' || c2 == 'U' || c2 == 'l' || c2 == 'L')
+                                && char.ToLowerInvariant(c1) != char.ToLowerInvariant(c2))
+                            {
+                                _position += 2;
+                            }
+                            else if (c1 == 'u' || c1 == 'U' || c1 == 'l' || c1 == 'L')
+                            {
+                                _position += 1;
+                            }
+                        }
+                        CurrentTokenText = _text.Substring(start, _position - start);
+                        CurrentTokenType = Ast.TokenType.Number;
+                        return;
+                    }
+                        while (_position < _text.Length && (char.IsDigit(_text[_position]) || _text[_position] == '_')) _position++;
                     if (_position < _text.Length && _text[_position] == '.' && !(_position + 1 < _text.Length && _text[_position + 1] == '.'))
                     {
                         _position++; //skip .
@@ -208,6 +235,36 @@
                     CurrentTokenType = Keywords.Contains(CurrentTokenText) ? Ast.TokenType.Keyword : Ast.TokenType.Identifier;
                     return;
                 }
+                //Combined string
+                if (_position + 2 < _text.Length)
+                {
+                    if ((current == '$' && _text[_position + 1] == '@' && _text[_position + 2] == '"') 
+                        || (current == '@' && _text[_position + 1] == '$' && _text[_position + 2] == '"'))
+                    {
+                        _position += 3; // skip $@"
+                        var sb = new StringBuilder();
+                        while (_position < _text.Length)
+                        {
+                            char c = _text[_position++];
+
+                            if (c == '"')
+                            {
+                                if (_position < _text.Length && _text[_position] == '"')
+                                {
+                                    sb.Append('"');
+                                    _position++;
+                                    continue;
+                                }
+                                break;
+                            }
+                            if (c == '\\') sb.Append("\\\\");
+                            else sb.Append(c);
+                        }
+                        CurrentTokenText = sb.ToString();
+                        CurrentTokenType = Ast.TokenType.InterpolatedString;
+                        return;
+                    }
+                }
                 //Interpolated string
                 if (current == '$' && _position + 1 < _text.Length && _text[_position + 1] == '"')
                 {
@@ -233,8 +290,35 @@
                     CurrentTokenType = Ast.TokenType.InterpolatedString;
                     return;
                 }
+                //Verbatim string
+                if (current == '@' && _position + 1 < _text.Length && _text[_position + 1] == '"')
+                {
+                    _position += 2; // skip @"
+                    var sb = new StringBuilder();
+                    while (_position < _text.Length)
+                    {
+                        char c = _text[_position++];
+
+                        if (c == '"')
+                        {
+                            if (_position < _text.Length && _text[_position] == '"')
+                            {
+                                sb.Append('"');
+                                _position++; // skip "
+                                continue;
+                            }
+                            break;
+                        }
+                        if (c == '\\') sb.Append("\\\\");
+                        else sb.Append(c);
+                    }
+
+                    CurrentTokenText = sb.ToString();
+                    CurrentTokenType = Ast.TokenType.String;
+                    return;
+                }
                 //String literal
-                if (current == '"')
+                    if (current == '"')
                 {
                     _position++; //skip "
                     var sb = new StringBuilder();
@@ -415,6 +499,11 @@
                     case 'n': sb.Append('\n'); break;
                     case 'r': sb.Append('\r'); break;
                     case 't': sb.Append('\t'); break;
+                    case 'a': sb.Append('\a'); break;
+                    case 'b': sb.Append('\b'); break;
+                    case 'f': sb.Append('\f'); break;
+                    case 'v': sb.Append('\v'); break;
+                    case '0': sb.Append('\0'); break;
                     case 'u':
                         if (i + 4 < s.Length && ushort.TryParse(s.Substring(i + 1, 4),
                                 NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var cp))
@@ -422,6 +511,33 @@
                             sb.Append((char)cp); i += 4; break;
                         }
                         sb.Append('u'); break;
+                    case 'U': // \UFFFFFFFF
+                        if (i + 8 < s.Length && uint.TryParse(s.Substring(i + 1, 8),
+                                NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var u32))
+                        { sb.Append(char.ConvertFromUtf32((int)u32)); i += 8; }
+                        else sb.Append('U');
+                        break;
+                    case 'x':
+                        {
+                            int start = i + 1;
+                            int max = Math.Min(s.Length - start, 4);
+                            int count = 0, val = 0;
+
+                            while (count < max)
+                            {
+                                int c = s[start + count];
+                                int hv = -1;
+                                if (c >= '0' && c <= '9') hv = c - '0';
+                                else if (c >= 'a' && c <= 'f') hv = c - 'a' + 10;
+                                else if (c >= 'A' && c <= 'F') hv = c - 'A' + 10;
+                                if (hv < 0) break;
+                                val = (val << 4) + hv;
+                                count++;
+                            }
+                            if (count == 0) sb.Append('x');
+                            else { sb.Append((char)val); i += count; }
+                            break;
+                        }
                     default: sb.Append(s[i]); break;
                 }
             }
@@ -764,6 +880,10 @@
                         looksLikeFunc = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen
                             || (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<");
                         _lexer.ResetCurrent(savePos, saveType, saveText);
+                        if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && TryConsumeTupleReturnSignature())
+                        {
+                            return ParseFunctionDeclaration(isVoid: false, returnTypeText: "tuple", fnMods: mods);
+                        }
                         if (looksLikeFunc) { _lexer.NextToken(); return ParseFunctionDeclaration(isVoid, retType, fnMods: mods); }
                         else if (LooksLikeStructureDeclaration())
                         {
@@ -813,6 +933,7 @@
                     case "switch": return ParseSwitch();
                     case "throw": return ParseThrow();
                     case "void": _lexer.NextToken(); return ParseFunctionDeclaration(isVoid: true);
+                    case "global": _lexer.NextToken(); return ParseUsing();
                     case "using": return ParseUsing();
                     case "const": return ParseConstDeclaration();
                     case "enum": return ParseEnumDeclaration();
@@ -887,6 +1008,10 @@
                         Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null);
                 }
             }
+            if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && TryConsumeTupleReturnSignature())
+            {
+                return ParseFunctionDeclaration(isVoid: false, returnTypeText: "tuple");
+            }
             //expect declaration
             if (IsTypeKeyword(_lexer.CurrentTokenText) && !int.TryParse(_lexer.CurrentTokenText, out _))
             {
@@ -937,7 +1062,12 @@
                 sawAny = true;
                 _lexer.NextToken(); //skip name
 
-                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) 
+                { 
+                    _lexer.NextToken();
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
+                    continue; 
+                }
                 break;
             }
             if (!sawAny || _lexer.CurrentTokenType != Ast.TokenType.ParenClose)
@@ -960,6 +1090,18 @@
             bool sawAny = false;
             while (true)
             {
+                if (_lexer.CurrentTokenType == Ast.TokenType.Identifier && _lexer.CurrentTokenText == "_")
+                {
+                    sawAny = true;
+                    _lexer.NextToken(); // skip _
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                    {
+                        _lexer.NextToken();
+                        if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
+                        continue;
+                    }
+                    break;
+                }
                 if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText) && _lexer.CurrentTokenText != "var"))
                 { sawAny = false; break; }
                 _lexer.NextToken(); //skip type
@@ -970,7 +1112,12 @@
                 _lexer.NextToken(); //skip name
                 sawAny = true;
 
-                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) 
+                { 
+                    _lexer.NextToken();
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
+                    continue;
+                }
                 break;
             }
             if (!sawAny || _lexer.CurrentTokenType != Ast.TokenType.ParenClose)
@@ -979,6 +1126,45 @@
             bool ok = _lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "=";
             _lexer.ResetCurrent(savePos, saveType, saveText);
             return ok;
+        }
+        private bool TryConsumeTupleReturnSignature()
+        {
+            if (_lexer.CurrentTokenType != Ast.TokenType.ParenOpen) return false;
+
+            int savePos = _lexer.Position;
+            var saveType = _lexer.CurrentTokenType;
+            var saveText = _lexer.CurrentTokenText;
+            _lexer.NextToken(); //skip (
+            while (true)
+            {
+                if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText) && _lexer.CurrentTokenText != "var"))
+                {
+                    _lexer.ResetCurrent(savePos, saveType, saveText);
+                    return false;
+                }
+                _lexer.NextToken(); //skip type
+                if (PeekPointerMark()) _lexer.NextToken(); //skip *
+                if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen) ReadArraySuffixes();
+                if (_lexer.CurrentTokenType == Ast.TokenType.Question) _lexer.NextToken(); //skip ?
+                if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+                    _lexer.NextToken();
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                {
+                    _lexer.NextToken();
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
+                    continue;
+                }
+                if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
+
+                _lexer.ResetCurrent(savePos, saveType, saveText);
+                return false;
+            }
+            _lexer.NextToken(); //skip )
+
+            if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
+            { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+
+            return true;
         }
         private bool LooksLikeConstructor(string structName)
         {
@@ -1040,7 +1226,8 @@
                     return false;
                 }
                 _lexer.NextToken();//skip struct name
-                bool ok = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
+                bool ok = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen 
+                    || _lexer.CurrentTokenType == Ast.TokenType.BraceOpen; ;
                 _lexer.ResetCurrent(savePos, saveType, saveText);
                 return ok;
             }
@@ -1130,8 +1317,10 @@
                 } while (true);
             }
             Consume(Ast.TokenType.ParenClose);
-
-            return new Ast.NewStructNode(structName, args.ToArray());
+            (string Name, Ast.AstNode Expr)[]? inits = null;
+            if (_lexer.CurrentTokenType == Ast.TokenType.BraceOpen)
+                inits = ParseObjectInitializer();
+            return new Ast.NewStructNode(structName, args.ToArray()) { Initializers = inits };
         }
         #endregion
         private Ast.AstNode ParseDeclaration(List<string>? mods = null)
@@ -1475,6 +1664,7 @@
                         {
                             hasComma = true;
                             _lexer.NextToken();
+                            if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
                             continue;
                         }
                         break;
@@ -1526,23 +1716,33 @@
 
                                 return new Ast.NewArrayNode(arrRank > 1 ? Ast.ValueType.Array : Ast.ValueType.Struct, len: arrSizes.ToArray());
                             }
-                            Consume(Ast.TokenType.ParenOpen);
                             var args = new List<Ast.AstNode>();
-                            if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                            if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
                             {
-                                do
+                                _lexer.NextToken();//skip (
+                                if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
                                 {
-                                    args.Add(ParseExpression());
-                                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
-                                    { _lexer.NextToken(); continue; }
-                                    break;
-                                } while (true);
+                                    while (true)
+                                    {
+                                        args.Add(ParseExpression());
+                                        if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                        {
+                                            _lexer.NextToken();
+                                            if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
+                                            continue;
+                                        }
+                                        break;
+                                    }
+                                }
+                                Consume(Ast.TokenType.ParenClose);
                             }
-                            Consume(Ast.TokenType.ParenClose);
-
+                            (string Name, Ast.AstNode Expr)[]? inits = null;
+                            if (_lexer.CurrentTokenType == Ast.TokenType.BraceOpen)
+                                inits = ParseObjectInitializer();
                             return new Ast.NewStructNode(structName, args.ToArray())
                             {
-                                Generic = typeArgs.Length == 0 ? null : new Ast.GenericUse(typeArgs)
+                                Generic = typeArgs.Length == 0 ? null : new Ast.GenericUse(typeArgs),
+                                Initializers = inits
                             };
                         }
                         if (!IsTypeKeyword(_lexer.CurrentTokenText))
@@ -1894,8 +2094,18 @@
             //cut string
             var parts = new List<Ast.AstNode>();
             var sb = new StringBuilder();
-            for (int i = 0; i < content.Length; i++)
+            int i = 0;
+            while (i < content.Length)
             {
+                //brace escape?
+                if (content[i] == '{' && i + 1 < content.Length && content[i + 1] == '{')
+                {
+                    sb.Append('{'); i += 2; continue;
+                }
+                if (content[i] == '}' && i + 1 < content.Length && content[i + 1] == '}')
+                {
+                    sb.Append('}'); i += 2; continue;
+                }
                 if (content[i] == '{')//expression start
                 {
                     if (sb.Length > 0)
@@ -1903,20 +2113,126 @@
                         parts.Add(new Ast.LiteralNode(Unescape(sb.ToString())));
                         sb.Clear();
                     }
+                    int j = i + 1;
+                    int depth = 0;
+                    bool inStr = false, inChar = false, inVerbatim = false;
+                    while (j < content.Length)
+                    {
+                        char ch = content[j];
 
-                    //paired } no nesting
-                    int j = content.IndexOf('}', i + 1);
-                    if (j < 0) throw new ApplicationException("Unclosed { in interpolated string");
+                        if (inStr)
+                        {
+                            if (ch == '\\') { j += 2; continue; }
+                            if (ch == '"') { inStr = false; j++; continue; }
+                            j++; continue;
+                        }
+                        if (inChar)
+                        {
+                            if (ch == '\\') { j += 2; continue; }
+                            if (ch == '\'') { inChar = false; j++; continue; }
+                            j++; continue;
+                        }
+                        if (inVerbatim)
+                        {
+                            if (ch == '"' && j + 1 < content.Length && content[j + 1] == '"') { j += 2; continue; }
+                            if (ch == '"') { inVerbatim = false; j++; continue; }
+                            j++; continue;
+                        }
+                        if (ch == '$' && j + 1 < content.Length)
+                        {
 
-                    string exprSrc = content.Substring(i + 1, j - i - 1);
+                        }
+                        if (ch == '@' && j + 1 < content.Length && content[j + 1] == '"') { inVerbatim = true; j += 2; continue; }
+                        if (ch == '"') { inStr = true; j++; continue; }
+                        if (ch == '\'') { inChar = true; j++; continue; }
 
-                    var exprParser = new Parser(exprSrc);
-                    parts.Add(exprParser.ParseExpression());
+                        if (ch == '{') { depth++; j++; continue; }
+                        if (ch == '}')
+                        {
+                            if (depth == 0) break;
+                            depth--; j++; continue;
+                        }
 
-                    i = j; //skip }
+                        j++;
+
+                    }
+                    if (j >= content.Length)
+                        throw new ApplicationException("Unclosed { in interpolated string");
+
+                    string exprSrc = content.Substring(i + 1, j - (i + 1)).Trim();
+                    int comma = -1, colon = -1, d = 0;
+                    bool sIn = false, cIn = false, vIn = false;
+
+                    for (int p = 0; p < exprSrc.Length; p++)
+                    {
+                        if (sIn) { if (exprSrc[p] == '\\') { p++; continue; } if (exprSrc[p] == '"') sIn = false; continue; }
+                        if (cIn) { if (exprSrc[p] == '\\') { p++; continue; } if (exprSrc[p] == '\'') cIn = false; continue; }
+                        if (vIn)
+                        {
+                            if (exprSrc[p] == '"' && p + 1 < exprSrc.Length && exprSrc[p + 1] == '"') { p++; continue; }
+                            if (exprSrc[p] == '"') { vIn = false; }
+                            continue;
+                        }
+                        if (exprSrc[p] == '"')
+                        {
+                            sIn = true; continue;
+                        }
+                        if (exprSrc[p] == '\'') { cIn = true; continue; }
+
+                        if (exprSrc[p] == '{') { d++; continue; }
+                        if (exprSrc[p] == '}') { d--; continue; }
+
+                        if (d == 0)
+                        {
+                            if (exprSrc[p] == ',' && comma < 0) { comma = p; continue; }
+                            if (exprSrc[p] == ':' && colon < 0) { colon = p; }
+                        }
+                    }
+                    string? exprText, alignText = null, fmtText = null;
+                    if (comma >= 0 && colon >= 0 && colon > comma)
+                    {
+                        exprText = exprSrc.Substring(0, comma).Trim();
+                        alignText = exprSrc.Substring(comma + 1, colon - (comma + 1)).Trim();
+                        fmtText = exprSrc.Substring(colon + 1).Trim();
+                    }
+                    else if (comma >= 0)
+                    {
+                        exprText = exprSrc.Substring(0, comma).Trim();
+                        alignText = exprSrc.Substring(comma + 1).Trim();
+                    }
+                    else if (colon >= 0)
+                    {
+                        exprText = exprSrc.Substring(0, colon).Trim();
+                        fmtText = exprSrc.Substring(colon + 1).Trim();
+                    }
+                    else
+                    {
+                        exprText = exprSrc;
+                    }
+                    Ast.AstNode valueNode = new Parser(exprText).ParseExpression();
+                    if (!string.IsNullOrEmpty(fmtText))
+                    {
+                        valueNode = new Ast.CallNode("ToString", new Ast.AstNode[] { valueNode, new Ast.LiteralNode(fmtText) });
+                    }
+                    else
+                    {
+                        valueNode = new Ast.CallNode("ToString", new Ast.AstNode[] { valueNode, new Ast.LiteralNode(null) });
+                    }
+                    if (!string.IsNullOrEmpty(alignText))
+                    {
+                        var alignNode = new Parser(alignText).ParseExpression();
+                        valueNode = new Ast.CallNode("Align", new Ast.AstNode[] { valueNode, alignNode });
+                    }
+
+                    parts.Add(valueNode);
+
+                    i = j + 1; // skip closing }
                     continue;
                 }
+                if (content[i] == '}')
+                    throw new ApplicationException("Single '}' in interpolated string is not allowed.");
                 sb.Append(content[i]);
+                i++;
             }
             if (sb.Length > 0) parts.Add(new Ast.LiteralNode(Unescape(sb.ToString())));
 
@@ -1962,6 +2278,20 @@
                 string cleaned = digits.ToString().Replace("_", "");
                 if (!ulong.TryParse(cleaned, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var ul))
                     throw new ApplicationException($"Invalid hex literal '{raw}'");
+
+                return CoerceInteger(ul, suffix);
+            }
+            if (s.Length >= 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
+            {
+                ReadOnlySpan<char> digits = s[2..];
+                EnsureValidDigitsWithUnderscores(digits, (char c) => c == '0' || c == '1', "binary", raw);
+                string cleaned = digits.ToString().Replace("_", "");
+                ulong ul = 0;
+                foreach (char c in cleaned)
+                {
+                    ulong v = (ulong)(c - '0');
+                    ul = (ul << 1) | v;
+                }
 
                 return CoerceInteger(ul, suffix);
             }
@@ -2411,7 +2741,33 @@
 
             return new Ast.ConstructorDeclarationNode(structName, paramNames.ToArray(), paramTypes.ToArray(), defaultVals.ToArray(), body, mods, init, paramsIndex);
         }
-
+        private (string Name, Ast.AstNode Expr)[] ParseObjectInitializer()
+        {
+            Consume(Ast.TokenType.BraceOpen);
+            var items = new List<(string, Ast.AstNode)>();
+            if (_lexer.CurrentTokenType != Ast.TokenType.BraceClose)
+            {
+                while (true)
+                {
+                    string field = _lexer.CurrentTokenText;
+                    Consume(Ast.TokenType.Identifier);
+                    if (!(_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "="))
+                        throw new ApplicationException("'=' expected in object initializer");
+                    _lexer.NextToken(); //skip =
+                    var expr = ParseExpression();
+                    items.Add((field, expr));
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                    {
+                        _lexer.NextToken();
+                        if (_lexer.CurrentTokenType == Ast.TokenType.BraceClose) break;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            Consume(Ast.TokenType.BraceClose);
+            return items.ToArray();
+        }
         private Ast.AstNode ParseClassDeclaration(IList<string>? mods = null) => ParseStructDeclaration(mods);
         private Ast.AstNode ParseInterfaceDeclaration(IList<string>? mods = null)
         {
@@ -2510,33 +2866,50 @@
             var names = new List<string>();
             while (true)
             {
-                if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText)))
-                    throw new ApplicationException("Type expected in tuple deconstruction");
+                if (_lexer.CurrentTokenType == Ast.TokenType.Identifier && _lexer.CurrentTokenText == "_")
+                {
+                    names.Add("_");
+                    _lexer.NextToken();
+                }
+                else
+                {
+                    if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText)))
+                        throw new ApplicationException("Type expected in tuple deconstruction");
 
-                string typeTok = _lexer.CurrentTokenText;
-                if (typeTok == "var")
-                    throw new ApplicationException("Explicit types are required in tuple deconstruction");
 
-                _lexer.NextToken(); //skip type
 
-                var vt = Enum.Parse<Ast.ValueType>(typeTok, true);
-                vt = ReadMaybePointer(vt);
-                vt = ReadMaybeNullable(vt);
-                var arr = ReadArraySuffixes();
-                if (arr.isArray) vt = Ast.ValueType.Array;
+                    string typeTok = _lexer.CurrentTokenText;
+                    if (typeTok == "var")
+                        throw new ApplicationException("Explicit types are required in tuple deconstruction");
 
-                string name = _lexer.CurrentTokenText;
-                Consume(Ast.TokenType.Identifier);
+                    _lexer.NextToken(); //skip type
 
-                Ast.AstNode init = new Ast.LiteralNode(null);
-                Ast.AstNode decl = arr.isArray
-                    ? new Ast.VariableDeclarationNode(vt, name, init, isArray: true, arrayLength: arr.dims, isPublic: false, innerType: null)
-                    : new Ast.VariableDeclarationNode(vt, name, init, isPublic: false, innerType: null);
+                    var vt = Enum.Parse<Ast.ValueType>(typeTok, true);
+                    vt = ReadMaybePointer(vt);
+                    vt = ReadMaybeNullable(vt);
+                    var arr = ReadArraySuffixes();
+                    if (arr.isArray) vt = Ast.ValueType.Array;
 
-                decls.Add(decl);
-                names.Add(name);
+                    string name = _lexer.CurrentTokenText;
+                    Consume(Ast.TokenType.Identifier);
 
-                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                    Ast.AstNode init = new Ast.LiteralNode(null);
+                    if (name != "_")
+                    {
+                        Ast.AstNode decl = arr.isArray
+                        ? new Ast.VariableDeclarationNode(vt, name, init, isArray: true, arrayLength: arr.dims, isPublic: false, innerType: null)
+                        : new Ast.VariableDeclarationNode(vt, name, init, isPublic: false, innerType: null);
+
+                        decls.Add(decl);
+                    }
+                    names.Add(name);
+                }
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) 
+                { 
+                    _lexer.NextToken(); 
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break; 
+                    continue; 
+                }
                 break;
             }
             Consume(Ast.TokenType.ParenClose);
@@ -2562,7 +2935,12 @@
                 Consume(Ast.TokenType.Identifier);
                 names.Add(name);
 
-                if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); continue; }
+                if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                {
+                    _lexer.NextToken();
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
+                    continue;
+                }
                 break;
             }
 
@@ -2666,7 +3044,20 @@
         #endregion
         private Ast.AstNode ParseGoto()
         {
-            _lexer.NextToken();
+            _lexer.NextToken(); //skip goto
+            if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "case")
+            {
+                _lexer.NextToken(); // skip case
+                var expr = ParseExpression();
+                Consume(Ast.TokenType.Semicolon);
+                return new Ast.GotoCaseNode(expr, isDefault: false);
+            }
+            if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "default")
+            {
+                _lexer.NextToken(); // skip default
+                Consume(Ast.TokenType.Semicolon);
+                return new Ast.GotoCaseNode(null, isDefault: true);
+            }
             string label = _lexer.CurrentTokenText;
             Consume(Ast.TokenType.Identifier);
             Consume(Ast.TokenType.Semicolon);
@@ -2698,8 +3089,9 @@
 
             Consume(Ast.TokenType.BraceOpen);
 
-            var cases = new List<(Ast.AstNode? value, List<Ast.AstNode> body)>();
+            var cases = new List<(Ast.PatternNode? pattern, Ast.AstNode? value, List<Ast.AstNode> body)>();
             List<Ast.AstNode>? currentBody = null;
+            Ast.PatternNode? currentPattern = null;
             Ast.AstNode? currentValue = null; //if null default
 
             while (_lexer.CurrentTokenType != Ast.TokenType.BraceClose && _lexer.CurrentTokenType != Ast.TokenType.EndOfInput)
@@ -2707,15 +3099,27 @@
                 if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && (_lexer.CurrentTokenText == "case" || _lexer.CurrentTokenText == "default"))
                 {
                     if (currentBody != null)
-                        cases.Add((currentValue, currentBody));
+                        cases.Add((currentPattern, currentValue, currentBody));
 
                     currentBody = new List<Ast.AstNode>();
+                    currentPattern = null;
                     currentValue = null;
 
                     if (_lexer.CurrentTokenText == "case")
                     {
                         _lexer.NextToken(); //skip case
-                        currentValue = ParseExpression();//const
+                        int savePos = _lexer.Position;
+                        var saveType = _lexer.CurrentTokenType;
+                        var saveText = _lexer.CurrentTokenText;
+                        try
+                        {
+                            currentPattern = ParsePattern();
+                        }
+                        catch
+                        {
+                            _lexer.ResetCurrent(savePos, saveType, saveText);
+                            currentValue = ParseExpression();
+                        }
                     }
                     else
                     {
@@ -2730,7 +3134,7 @@
             }
 
             if (currentBody != null)
-                cases.Add((currentValue, currentBody));
+                cases.Add((currentPattern, currentValue, currentBody));
 
             Consume(Ast.TokenType.BraceClose);
 
@@ -2781,7 +3185,11 @@
         private Ast.AstNode ParseThrow()
         {
             _lexer.NextToken(); //skip throw
-
+            if (_lexer.CurrentTokenType == Ast.TokenType.Semicolon)
+            {
+                _lexer.NextToken(); // consume ';'
+                return new Ast.ThrowNode(null);
+            }
             //skip new if needed
             if (_lexer.CurrentTokenType == Ast.TokenType.Keyword &&
                 _lexer.CurrentTokenText == "new")
@@ -2909,7 +3317,9 @@
                 _lexer.NextToken();
                 if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
                 {
+                    string name = _lexer.CurrentTokenText;
                     _lexer.NextToken();
+                    return new Ast.DeclarationPatternNode(vt, name);
                 }
                 return new Ast.TypePatternNode(vt);
             }
@@ -5807,7 +6217,7 @@
             Keyword,
             Number,
             String,
-            InterpolatedString,
+            InterpolatedString, 
             Char,
             Operator,
             ParenOpen,//(
@@ -5824,7 +6234,7 @@
             Dot,
             Range,
         }
-
+        
         public class OperatorInfo
         {
             public int Precedence { get; }
@@ -6184,9 +6594,43 @@
             this.Context.RegisterNative("Replace", (string str, char old, string newStr) => { return str.Replace(old.ToString(), newStr); });
             this.Context.RegisterNative("Remove", (string str, char old) => { return str.Replace(old.ToString(), ""); });
             this.Context.RegisterNative("Remove", (string str, string old) => { return str.Replace(old, ""); });
+            this.Context.RegisterNative("Align", (string s, int width) => width >= 0 ? s.PadLeft(width) : s.PadRight(-width)); 
+            this.Context.RegisterNative("ToString", (object? value, string? format) =>
+            {
+                if (value is null) return "";
+                if (string.IsNullOrEmpty(format)) return value switch
+                    {
+                        DateTime dt => dt.ToString(CultureInfo.InvariantCulture),
+                        IFormattable f => f.ToString(null, CultureInfo.InvariantCulture) ?? "",
+                        _ => value.ToString() ?? ""
+                    };
+                bool IsAllDigits(ReadOnlySpan<char> s)
+                {
+                    for (int i = 0; i < s.Length; i++) if (!char.IsDigit(s[i])) return false;
+                    return true;
+                }
+                if ((format[0] == 'x' || format[0] == 'X') && (format.Length == 1 || IsAllDigits(format.AsSpan(1))))
+                {
+                    bool upper = format[0] == 'X';
+                    string width = format.Length > 1 ? format.Substring(1) : "";
+                    string fmt = (upper ? "X" : "x") + width;
+
+                    return value switch
+                    {
+                        byte or sbyte or short or ushort or int or uint or long or ulong
+                            => ((IFormattable)value).ToString(fmt, CultureInfo.InvariantCulture) ?? "",
+                        Enum e
+                            => Convert.ToUInt64(e).ToString(fmt, CultureInfo.InvariantCulture),
+                        _ => throw new ApplicationException("Hex format is valid only for integral types and enums")
+                    };
+                }
+                if (value is IFormattable formattable) return formattable.ToString(format, CultureInfo.InvariantCulture) ?? "";
+                return value.ToString() ?? "";
+            });
             #endregion
             this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object[] callArgs)
                 => InvokeByAttribute(this.Context, attr, attrArgs, callArgs));
+            
             this.Context.RegisterNative("IntParse", (string val) => { return int.Parse(val); });
             this.Context.RegisterNative("Int.Parse", (string val) => { return int.Parse(val); });
             this.Context.RegisterNative("IntParse", (char val) => { return (int)(val - '0'); });
@@ -6967,9 +7411,9 @@
                     if (res is bool) return res;
                     switch (lCode)
                     {
-                        case TypeCode.Byte: return Convert.ToByte(res);
-                        case TypeCode.UInt16: return Convert.ToUInt16(res);
-                        case TypeCode.UInt32: return Convert.ToUInt32(res);
+                        case TypeCode.Byte: return res is byte rb ? rb : unchecked((byte)Convert.ToUInt64(res));
+                        case TypeCode.UInt16: return res is ushort ru16 ? ru16 : unchecked((ushort)Convert.ToUInt64(res));
+                        case TypeCode.UInt32: return res is uint ru32 ? ru32 : unchecked((uint)Convert.ToUInt64(res));
                         default: return res;
                     }
                 }
@@ -6981,9 +7425,9 @@
                     if (res is bool) return res;
                     switch (lCode)
                     {
-                        case TypeCode.SByte: return Convert.ToSByte(res);
-                        case TypeCode.Int16: return Convert.ToInt16(res);
-                        case TypeCode.Int32: return Convert.ToInt32(res);
+                        case TypeCode.SByte: return res is sbyte rsb ? rsb : unchecked((sbyte)Convert.ToInt64(res));
+                        case TypeCode.Int16: return res is short r16 ? r16 : unchecked((short)Convert.ToInt64(res));
+                        case TypeCode.Int32: return res is int r32 ? r32 : unchecked((int)Convert.ToInt64(res));
                         default: return res;
                     }
                 }
@@ -7720,7 +8164,6 @@
                     context.EnterScope();
                     try
                     {
-                        ;
                         var cond = Condition.Evaluate(context);
                         if (!(cond is bool bb && bb)) break;
 
@@ -7729,6 +8172,7 @@
                         {
                             case BreakSignal: break;
                             case ContinueSignal: continue;
+                            case GotoCaseSignal:
                             case ReturnSignal: return res;
                         }
                     }
@@ -7768,7 +8212,7 @@
                         var res = Body.Evaluate(context);
                         if (res is BreakSignal) break;
                         if (res is ContinueSignal) { }
-                        if (res is ReturnSignal) return res;
+                        if (res is ReturnSignal or GotoCaseSignal) return res;
                     }
                     finally { context.ExitScope(); }
                 }
@@ -7818,7 +8262,7 @@
                             var res = Body.Evaluate(context);
                             if (res is BreakSignal) break;
                             if (res is ContinueSignal) { Step?.Evaluate(context); continue; }
-                            if (res is ReturnSignal) return res;
+                            if (res is ReturnSignal or GotoCaseSignal) return res;
                         }
                         finally
                         {
@@ -7858,7 +8302,7 @@
                 Body = body;
             }
 
-            public override object? Evaluate(ExecutionContext context)
+            public override object Evaluate(ExecutionContext context)
             {
                 var collection = CollectionExpr.Evaluate(context);
                 IEnumerable<object?> items;
@@ -7874,6 +8318,10 @@
                            ? BitConverter.ToInt32(context.RawMemory, addr)
                            : context.ReadFromStack(addr, et);
                 });
+                else if(collection is string str)
+                {
+                    items = (IEnumerable<object?>)(str.ToCharArray().Cast<object>());
+                }
                 else throw new ApplicationException("Unsupported source in foreach");
                 foreach (var item in items)
                 {
@@ -7886,12 +8334,12 @@
                         var res = Body.Evaluate(context);
                         if (res is BreakSignal) break;
                         if (res is ContinueSignal) continue;
-                        if (res is ReturnSignal) return res;
+                        if (res is ReturnSignal or GotoCaseSignal) return res;
                     }
                     finally { context.ExitScope(); }
                 }
 
-                return null;
+                return null!;
 
             }
 
@@ -7923,16 +8371,16 @@
                 if (cond is bool b && b)
                 {
                     var res = ThenBody.Evaluate(context);
-                    if (res is ReturnSignal or BreakSignal or ContinueSignal)
+                    if (res is ReturnSignal or BreakSignal or ContinueSignal or GotoCaseSignal)
                         return res;
                 }
                 else if (ElseBody is not null)
                 {
                     var res = ElseBody.Evaluate(context);
-                    if (res is ReturnSignal or BreakSignal or ContinueSignal)
+                    if (res is ReturnSignal or BreakSignal or ContinueSignal or GotoCaseSignal)
                         return res;
                 }
-                return null;
+                return null!;
             }
             public override void Print(string indent = "", bool isLast = true)
             {
@@ -7995,8 +8443,15 @@
                     {
                         if (ExVar != null)
                             context.Declare(ExVar, ValueType.String, ex.Message);
-                        var res = CatchBlock.Evaluate(context);
-                        return res;
+                        try
+                        {
+                            var res = CatchBlock.Evaluate(context);
+                            return res;
+                        }
+                        catch (RethrowException)
+                        {
+                            throw ex;
+                        }
                     }
                     finally { context.ExitScope(); }
                 }
@@ -8020,9 +8475,9 @@
         public class SwitchNode : AstNode
         {
             public AstNode Discriminant;
-            public List<(AstNode? value, List<AstNode> body)> Cases;
+            public List<(PatternNode? pattern, AstNode? value, List<AstNode> body)> Cases;
 
-            public SwitchNode(AstNode disc, List<(AstNode? value, List<AstNode> body)> cases)
+            public SwitchNode(AstNode disc, List<(PatternNode? pattern, AstNode? value, List<AstNode> body)> cases)
             {
                 Discriminant = disc;
                 Cases = cases;
@@ -8031,30 +8486,91 @@
             public override object Evaluate(ExecutionContext context)
             {
                 context.Check();
-                var discVal = Discriminant.Evaluate(context);
-                bool execute = false;
-                foreach (var (valExpr, body) in Cases)
-                {
-                    if (!execute)
-                    {
-                        if (valExpr == null) //default
-                            execute = true;
-                        else
-                            execute = Equals(discVal, valExpr.Evaluate(context));
-                    }
+                var disc = Discriminant.Evaluate(context);
 
-                    if (execute)
+                var constValues = new object?[Cases.Count];
+                int defaultIndex = -1;
+                for (int j = 0; j < Cases.Count; j++)
+                {
+                    var (pat, val, _) = Cases[j];
+                    if (pat is null && val is null)
                     {
-                        foreach (var stmt in body)
-                        {
-                            var r = stmt.Evaluate(context);
-                            if (r is BreakSignal) return null!;
-                            if (r is ContinueSignal or ReturnSignal) return r;
-                        }
+                        defaultIndex = j;
+                        constValues[j] = null;
+                    }
+                    else if (val is not null)
+                    {
+                        constValues[j] = val.Evaluate(context);
                     }
                 }
+
+                int FindMatch(object? v)
+                {
+                    for (int k = 0; k < Cases.Count; k++)
+                    {
+                        var (pat, val, _) = Cases[k];
+                        if (pat is not null)
+                        {
+                            bool matched;
+                            context.EnterScope();
+                            try { matched = pat.Match(v, context); }
+                            finally { context.ExitScope(); }
+                            if (matched) return k;
+                        }
+                        else if (val is not null)
+                        {
+                            if (Equals(constValues[k], v)) return k;
+                        }
+                    }
+                    return -1;
+                }
+
+                int i = FindMatch(disc);
+                if (i < 0) i = defaultIndex;
+                if (i < 0) return null!;
+
+                NEXT_CASE:
+                while (i < Cases.Count)
+                {
+                    var (pat, _, body) = Cases[i];
+                    context.EnterScope();
+                    try
+                    {
+                        if (pat is not null)
+                        {
+                            _ = pat.Match(disc, context);
+                        }
+
+                        for (int j = 0; j < body.Count; j++)
+                        {
+                            var res = body[j].Evaluate(context);
+                            switch (res)
+                            {
+                                case BreakSignal: return null!;
+                                case ContinueSignal:
+                                case ReturnSignal: return res;
+                                case GotoCaseSignal g:
+                                    {
+                                        int target = g.IsDefault ? defaultIndex : FindMatch(g.Value);
+                                        if (target < 0)
+                                            throw new ApplicationException("goto case: target not found");
+                                        i = target;
+                                        goto NEXT_CASE;
+                                    }
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        context.ExitScope();
+                    }
+
+                    i++;
+                }
+
                 return null!;
             }
+
 
             public override void Print(string indent = "", bool isLast = true)
             {
@@ -8064,25 +8580,37 @@
 
                 for (int i = 0; i < Cases.Count; i++)
                 {
-                    if (Cases[i].value != null) Cases[i].value?.Print(childIndent, isLast);
-                    else Console.WriteLine($"{childIndent}└── default");
-                    if (Cases[i].body != null) foreach (var body in Cases[i].body) body.Print((childIndent) + (i == Cases.Count - 1 ? "    " : "│   "), false);
+                    var (pat, val, body) = Cases[i];
+                    if (pat is not null)
+                        pat.Print(childIndent, false);
+                    else if (val is not null)
+                        val.Print(childIndent, false);
+                    else
+                        Console.WriteLine($"{childIndent}└── default");
+
+                    var bi = childIndent + (i == Cases.Count - 1 ? "    " : "│   ");
+                    foreach (var stmt in body)
+                        stmt.Print(bi, false);
                 }
             }
         }
         public class ThrowNode : AstNode
         {
-            public AstNode Expr;
-            public ThrowNode(AstNode expr) => Expr = expr;
+            public AstNode? Expr;
+            public ThrowNode(AstNode? expr) => Expr = expr;
 
             public override object Evaluate(ExecutionContext context)
             {
+                if(Expr is null) //rethrow
+                {
+                    throw new RethrowException();
+                }
                 context.Check();
                 var msg = Expr.Evaluate(context)?.ToString();
                 throw new Exception(msg);
             }
             public override void Print(string indent = "", bool isLast = true)
-            { Console.WriteLine($"{indent}└── throw"); Expr.Print(indent + (isLast ? "    " : "│   ")); }
+            { Console.WriteLine($"{indent}└── throw"); Expr?.Print(indent + (isLast ? "    " : "│   ")); }
         }
         public class LabelNode : AstNode
         {
@@ -8117,7 +8645,29 @@
             }
 
         }
+        public sealed class GotoCaseNode : AstNode
+        {
+            public AstNode? Expr;
+            public bool IsDefault;
+            public GotoCaseNode(AstNode? expr, bool isDefault)
+            { Expr = expr; IsDefault = isDefault; }
+
+            public override object Evaluate(ExecutionContext context)
+            {
+                var target = IsDefault ? null : Expr!.Evaluate(context);
+                return new GotoCaseSignal(target, IsDefault);
+            }
+
+            public override void Print(string indent = "", bool isLast = true)
+            {
+                Console.WriteLine(IsDefault ? $"{indent}└── goto default" : $"{indent}└── goto case ...");
+            }
+        }
         #region Signals
+        public sealed class RethrowException : Exception
+        {
+            public RethrowException() : base("rethrow outside of catch") { }
+        }
         public class ReturnSignal
         {
             public object? Value;
@@ -8126,6 +8676,15 @@
             {
                 Value = value;
                 PinKey = pinKey;
+            }
+        }
+        public sealed class GotoCaseSignal
+        {
+            public readonly object? Value;
+            public readonly bool IsDefault;
+            public GotoCaseSignal(object? value, bool isDefault)
+            {
+                Value = value; IsDefault = isDefault;
             }
         }
         public class BreakSignal { }
@@ -8241,7 +8800,7 @@
                     {
                         context.Check();
                         var res = statement.Evaluate(context);
-                        if (res is ReturnSignal or BreakSignal or ContinueSignal) return res;
+                        if (res is ReturnSignal or BreakSignal or ContinueSignal or GotoCaseSignal) return res;
                     }
                     return result!;
                 }
@@ -8285,9 +8844,44 @@
                 {
                     var disp = Declaration.Evaluate(context);
                     context.EnterScope();
-                    try { Body.Evaluate(context); }
+                    try 
+                    {
+                        Declaration.Evaluate(context);
+                        Body.Evaluate(context);
+                        void TryDispose(string varName)
+                        {
+                            if (!context.HasVariable(varName)) return;
+                            var info = context.Get(varName);
+                            if (info.Type != Ast.ValueType.Object) return;
+
+                            var ptrObj = Convert.ToInt32(context.ReadVariable(varName));
+                            if (ptrObj < context.StackSize || ptrObj >= context.StackSize + context.MemoryUsed) return;
+
+                            int handleId = BitConverter.ToInt32(context.RawMemory, ptrObj);
+                            if (handleId == -1) return;// null
+
+                            var obj = context.GetObject(handleId);
+                            if (obj is IDisposable d)
+                            {
+                                d.Dispose();
+                            }
+                        }
+                        switch (Declaration)
+                        {
+                            case VariableDeclarationNode vd:
+                                TryDispose(vd.Name);
+                                break;
+
+                            case StatementListNode sl:
+                                foreach (var node in sl.Statements)
+                                    if (node is VariableDeclarationNode vd)
+                                        TryDispose(vd.Name);
+                                break;
+                            default: break;
+                        }
+                        return null!;
+                    }
                     finally { context.ExitScope(); }
-                    return null!;
                 }
                 string ns;
                 switch (Declaration)
@@ -8741,10 +9335,9 @@
                     int sc = BestScore(f, fm);
                     if (sc >= 0) candidates.Add((f, fm, va, sc));
                 }
-
-                var best = candidates.OrderByDescending(t => t.score).FirstOrDefault();
-                if (best.fn.ParamNames is null || best.fn.ParamNames.Length == 0)
+                if (candidates.Count == 0)
                     throw new ApplicationException($"No overload '{Name}' matches given arguments.");
+                var best = candidates.OrderByDescending(t => t.score).First();
                 var fn = best.fn;
                 string fnNs = Name.Contains('.') ? Name.Substring(0, Name.LastIndexOf('.')) : "";
                 if (fnNs != ctx.CurrentNameSpace && !fn.IsPublic) throw new ApplicationException($"The function '{Name}' is inaccessible due to its protection level");
@@ -9156,6 +9749,7 @@
             private readonly string _structName;
             public Ast.AstNode[] Args { get; }
             public GenericUse? Generic { get; init; }
+            public (string Name, Ast.AstNode Expr)[]? Initializers { get; init; }
             public NewStructNode(string name, params Ast.AstNode[]? args)
             {
                 _structName = name;
@@ -9278,6 +9872,14 @@
                         }
                     }
                 }
+                if (Initializers is { Length: > 0 })
+                {
+                    foreach (var (name, ex) in Initializers)
+                    {
+                        var val = ex.Evaluate(context);
+                        context.WriteStructField(instPtr, name, val);
+                    }
+                }
                 return instPtr;
             }
 
@@ -9368,6 +9970,30 @@
                 => value != null && MatchVariableType(value, Target);
             public override void Print(string indent = "", bool last = true)
                 => Console.WriteLine($"TypePatternNode {Target}");
+        }
+        public sealed class DeclarationPatternNode : PatternNode
+        {
+            public readonly ValueType Target;
+            public readonly string Name;
+            public DeclarationPatternNode(ValueType t, string name)
+            { Target = t; Name = name; }
+            public override bool Match(object? value, ExecutionContext ctx)
+            {
+                if (value is null) return Target == ValueType.Object;
+                if (!MatchVariableType(value, Target))
+                {
+                    try { value = ctx.Cast(value, Target); }
+                    catch { return false; }
+                }
+                if (Name != "_")
+                {
+                    if (ctx.HasVariable(Name)) ctx.WriteVariable(Name, value!);
+                    else ctx.Declare(Name, Target, value!);
+                }
+                return true;
+            }
+            public override void Print(string ind = "", bool last = true)
+                => Console.WriteLine($"{ind}└── decl-pattern {Target} {Name}");
         }
         public sealed class RelationalPatternNode : PatternNode
         {
