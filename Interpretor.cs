@@ -781,7 +781,7 @@
 
             return args.ToArray();
         }
-        void SkipTypeArgsIfAny() => _ = ParseTypeArgumentListIfAny();
+        bool SkipTypeArgsIfAny() => ParseTypeArgumentListIfAny().Length>0;
         #endregion
         private bool IsStructModifier()
         {
@@ -869,21 +869,39 @@
                     if (_lexer.CurrentTokenText == "class") return ParseClassDeclaration(mods);
                     bool isVoid = _lexer.CurrentTokenText == "void";
                     string? retType = isVoid ? null : _lexer.CurrentTokenText;
+                    int savePos = _lexer.Position;
+                    var saveType = _lexer.CurrentTokenType;
+                    var saveText = _lexer.CurrentTokenText;
+                    if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && TryConsumeTupleReturnSignature())
+                    {
+                        if (PeekPointerMark())
+                            _lexer.NextToken();
+                        if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
+                            ReadArraySuffixes();
+                        int savePos2 = _lexer.Position;
+                        var saveType2 = _lexer.CurrentTokenType;
+                        var saveText2 = _lexer.CurrentTokenText;
+                        bool looksLikeFunc = _lexer.CurrentTokenType == Ast.TokenType.Identifier;
+                        _lexer.NextToken();//skip name
+                        looksLikeFunc = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen
+                            || (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<");
+                        if (looksLikeFunc)
+                        {
+                            _lexer.ResetCurrent(savePos2, saveType2, saveText2);
+                            return ParseFunctionDeclaration(isVoid: false, returnTypeText: "tuple", fnMods: mods);
+                        }
+                        else { _lexer.ResetCurrent(savePos, saveType, saveText); return ParseDeclaration(mods); }
+                    }
                     if (isVoid || IsTypeKeyword(_lexer.CurrentTokenText) || _lexer.CurrentTokenType == Ast.TokenType.Identifier)
                     {
-                        int savePos = _lexer.Position;
-                        var saveType = _lexer.CurrentTokenType;
-                        var saveText = _lexer.CurrentTokenText;
                         _lexer.NextToken();//skip type
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<")
+                            SkipTypeArgsIfAny();
                         bool looksLikeFunc = _lexer.CurrentTokenType == Ast.TokenType.Identifier;
                         _lexer.NextToken();//skip name
                         looksLikeFunc = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen
                             || (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<");
                         _lexer.ResetCurrent(savePos, saveType, saveText);
-                        if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && TryConsumeTupleReturnSignature())
-                        {
-                            return ParseFunctionDeclaration(isVoid: false, returnTypeText: "tuple", fnMods: mods);
-                        }
                         if (looksLikeFunc) { _lexer.NextToken(); return ParseFunctionDeclaration(isVoid, retType, fnMods: mods); }
                         else if (LooksLikeStructureDeclaration())
                         {
@@ -901,15 +919,24 @@
                                 bool target = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
                                 _lexer.ResetCurrent(p, t, s);
 
-                                expr = target ? ParseTargetTypedNew(structTypeName) : ParseExpression();
+                                expr = target ? ParseTargetTypedNew(structTypeName, leftTypeArgs) : ParseExpression();
                             }
                             else expr = ParseExpression();
                             Consume(Ast.TokenType.Semicolon);
+                            bool isDict = string.Equals(structTypeName, "Dictionary", StringComparison.Ordinal);
+                            if (isDict && expr is Ast.CollectionExpressionNode coll && coll.Items.Length == 0)
+                            {
+                                expr = new Ast.NewDictionaryNode(
+                                    new Ast.GenericUse(leftTypeArgs),
+                                    Array.Empty<Ast.AstNode>(),
+                                    Array.Empty<(Ast.AstNode Key, Ast.AstNode Value)>()
+                                );
+                            }
                             bool isPublic = mods is not null && mods.Contains("public");
                             if (mods != null)
                                 name = string.IsNullOrEmpty(_currentNamespace) ? name : $"{_currentNamespace}.{name}";
-                            return new Ast.VariableDeclarationNode(
-                                Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null)
+                            var declType = isDict ? Ast.ValueType.Dictionary : Ast.ValueType.Struct;
+                            return new Ast.VariableDeclarationNode(declType, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null)
                             {
                                 CustomTypeName = structTypeName,
                                 Generic = leftTypeArgs.Length == 0 ? null : new Ast.GenericUse(leftTypeArgs)
@@ -947,15 +974,29 @@
             if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
             {
                 var attrs = ParseAttributeList();
-
                 //expect function delaration
+                if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && TryConsumeTupleReturnSignature())
+                {
+                    if (PeekPointerMark())
+                        _lexer.NextToken();
+
+                    if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
+                        ReadArraySuffixes();
+                    return (Ast.FunctionDeclarationNode)ParseFunctionDeclaration(isVoid: false, returnTypeText: "tuple", attrs: attrs);
+                }
                 if (_lexer.CurrentTokenText == "void" || IsTypeKeyword(_lexer.CurrentTokenText))
                 {
                     bool isVoid = _lexer.CurrentTokenText == "void";
                     string? retType = isVoid ? null : _lexer.CurrentTokenText;
                     _lexer.NextToken();//skip type
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<")
+                        SkipTypeArgsIfAny();
 
+                    if (PeekPointerMark())
+                        _lexer.NextToken();
 
+                    if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
+                        ReadArraySuffixes();
                     return (Ast.FunctionDeclarationNode)ParseFunctionDeclaration(isVoid, retType, attrs: attrs);
                 }
 
@@ -989,9 +1030,10 @@
                 {
                     string structTypeName = _lexer.CurrentTokenText;
                     _lexer.NextToken();//skip type
+                    var leftTypeArgs = ParseTypeArgumentListIfAny();
                     string name = _lexer.CurrentTokenText;
                     Consume(Ast.TokenType.Identifier);
-                    Consume(Ast.TokenType.Operator);
+                    Consume(Ast.TokenType.Operator);//expect =
                     Ast.AstNode expr;
                     if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new")
                     {
@@ -1000,12 +1042,25 @@
                         bool target = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
                         _lexer.ResetCurrent(p, t, s);
 
-                        expr = target ? ParseTargetTypedNew(structTypeName) : ParseExpression();
+                        expr = target ? ParseTargetTypedNew(structTypeName, leftTypeArgs) : ParseExpression();
                     }
                     else expr = ParseExpression();
                     Consume(Ast.TokenType.Semicolon);
-                    return new Ast.VariableDeclarationNode(
-                        Ast.ValueType.Struct, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null);
+                    bool isDict = string.Equals(structTypeName, "Dictionary", StringComparison.Ordinal);
+                    if (isDict && expr is Ast.CollectionExpressionNode coll && coll.Items.Length==0)
+                    {
+                        expr = new Ast.NewDictionaryNode(
+                            new Ast.GenericUse(leftTypeArgs),
+                            Array.Empty<Ast.AstNode>(),
+                            Array.Empty<(Ast.AstNode Key, Ast.AstNode Value)>()
+                        );
+                    }
+                    var declType = isDict ? Ast.ValueType.Dictionary : Ast.ValueType.Struct;
+                    return new Ast.VariableDeclarationNode(declType, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null)
+                    {
+                        CustomTypeName = structTypeName,
+                        Generic = leftTypeArgs.Length == 0 ? null : new Ast.GenericUse(leftTypeArgs)
+                    };
                 }
             }
             if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && TryConsumeTupleReturnSignature())
@@ -1019,7 +1074,10 @@
                 string saveType = _lexer.CurrentTokenText;
                 int pos = _lexer.Position;
                 Ast.TokenType saveToken = _lexer.CurrentTokenType;
-                _lexer.NextToken();//skip (
+                _lexer.NextToken();
+
+                if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<")
+                    SkipTypeArgsIfAny();
 
                 if (PeekPointerMark())
                     _lexer.NextToken();
@@ -1196,7 +1254,7 @@
                 return false;
 
             _lexer.NextToken();//skip type
-            SkipTypeArgsIfAny();
+            bool hadGenerics = SkipTypeArgsIfAny();
             if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
             {
                 _lexer.ResetCurrent(savePos, saveType, saveText);
@@ -1212,28 +1270,27 @@
                 return false;
             }
             _lexer.NextToken();//skip =
-            if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new"))
+            if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new")
             {
-                _lexer.ResetCurrent(savePos, saveType, saveText);
-                return false;
-            }
-            _lexer.NextToken();//skip new
-            if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
-            {
-                if (_lexer.CurrentTokenText != saveText)
+                _lexer.NextToken();//skip new
+                if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
                 {
+                    if (_lexer.CurrentTokenText != saveText)
+                    { _lexer.ResetCurrent(savePos, saveType, saveText); return false; }
+                    _lexer.NextToken(); //skip struct name
+                    SkipTypeArgsIfAny();
+                    bool ok = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen
+                           || _lexer.CurrentTokenType == Ast.TokenType.BraceOpen;
                     _lexer.ResetCurrent(savePos, saveType, saveText);
-                    return false;
+                    return ok;
                 }
-                _lexer.NextToken();//skip struct name
-                bool ok = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen 
-                    || _lexer.CurrentTokenType == Ast.TokenType.BraceOpen; ;
+                bool looksTargetTyped = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
                 _lexer.ResetCurrent(savePos, saveType, saveText);
-                return ok;
+                return looksTargetTyped;
             }
-            bool looksTargetTyped = _lexer.CurrentTokenType == Ast.TokenType.ParenOpen;
+            bool looksCollectionExpr = hadGenerics && _lexer.CurrentTokenType == Ast.TokenType.BracketsOpen;
             _lexer.ResetCurrent(savePos, saveType, saveText);
-            return looksTargetTyped;
+            return looksCollectionExpr;
         }
         private bool LooksLikeStructArrayDeclaration()
         {
@@ -1298,7 +1355,7 @@
             _lexer.ResetCurrent(savePos, saveType, saveText);
             return ok;
         }
-        private Ast.NewStructNode ParseTargetTypedNew(string structName)
+        private Ast.AstNode ParseTargetTypedNew(string structName, string[]? leftTypeArgs = null)
         {
             if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "new"))
                 throw new ApplicationException("Expected 'new'");
@@ -1317,6 +1374,21 @@
                 } while (true);
             }
             Consume(Ast.TokenType.ParenClose);
+            if (string.Equals(structName, "Dictionary", StringComparison.Ordinal))
+            {
+                if (leftTypeArgs == null || leftTypeArgs.Length != 2)
+                    throw new ApplicationException("Dictionary requires exactly 2 generic type arguments on the left side.");
+
+                (Ast.AstNode Key, Ast.AstNode Value)[]? init = null;
+                if (_lexer.CurrentTokenType == Ast.TokenType.BraceOpen)
+                    init = ParseDictionaryInitializer();
+
+                return new Ast.NewDictionaryNode(
+                    new Ast.GenericUse(leftTypeArgs),
+                    args.ToArray(),
+                    init
+                );
+            }
             (string Name, Ast.AstNode Expr)[]? inits = null;
             if (_lexer.CurrentTokenType == Ast.TokenType.BraceOpen)
                 inits = ParseObjectInitializer();
@@ -1692,6 +1764,35 @@
                             string structName = _lexer.CurrentTokenText;
                             _lexer.NextToken();
                             var typeArgs = ParseTypeArgumentListIfAny();
+                            if (string.Equals(structName, "Dictionary", StringComparison.Ordinal))
+                            {
+                                if (typeArgs.Length != 2)
+                                    throw new ArgumentException("Dictionary requires exactly 2 generic type arguments: Dictionary<TKey, TValue>");
+                                var optionalArgs = new List<Ast.AstNode>();
+                                if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen)
+                                {
+                                    _lexer.NextToken(); //skip (
+                                    if (_lexer.CurrentTokenType != Ast.TokenType.ParenClose)
+                                    {
+                                        while (true)
+                                        {
+                                            optionalArgs.Add(ParseExpression());
+                                            if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                            {
+                                                _lexer.NextToken();
+                                                if (_lexer.CurrentTokenType == Ast.TokenType.ParenClose) break;
+                                                continue;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    Consume(Ast.TokenType.ParenClose);
+                                }
+                                (Ast.AstNode Key, Ast.AstNode Value)[]? init = null;
+                                if (_lexer.CurrentTokenType == Ast.TokenType.BraceOpen)
+                                    init = ParseDictionaryInitializer();
+                                return new Ast.NewDictionaryNode( new Ast.GenericUse(typeArgs), optionalArgs.ToArray(), init );
+                            }
                             if (_lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
                             {
                                 var arrSizes = new List<Ast.AstNode>();
@@ -1739,7 +1840,7 @@
                             (string Name, Ast.AstNode Expr)[]? inits = null;
                             if (_lexer.CurrentTokenType == Ast.TokenType.BraceOpen)
                                 inits = ParseObjectInitializer();
-                            return new Ast.NewStructNode(structName, args.ToArray())
+                                return new Ast.NewStructNode(structName, args.ToArray())
                             {
                                 Generic = typeArgs.Length == 0 ? null : new Ast.GenericUse(typeArgs),
                                 Initializers = inits
@@ -1835,6 +1936,27 @@
                         var strValue = _lexer.CurrentTokenText;
                         _lexer.NextToken();
                         return ParseInterpolatedString(strValue);
+                    }
+                case Ast.TokenType.BracketsOpen:
+                    {
+                        _lexer.NextToken();//skip [
+                        var items = new List<Ast.AstNode>();
+                        if (_lexer.CurrentTokenType != Ast.TokenType.BracketsClose)
+                        {
+                            while (true)
+                            {
+                                items.Add(ParseExpression());
+                                if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                                {
+                                    _lexer.NextToken();
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.BracketsClose) break;
+                                    continue;
+                                }
+                                break;
+                            }
+                        }
+                        Consume(Ast.TokenType.BracketsClose);
+                        return new Ast.CollectionExpressionNode(items.ToArray());
                     }
                 case Ast.TokenType.Identifier:
                     {
@@ -2416,6 +2538,8 @@
         private Ast.AstNode ParseFunctionDeclaration(bool isVoid = false, string? returnTypeText = null, string? name = null, IList<Ast.AttributeNode>? attrs = null, List<string>? fnMods = null)
         {
             Ast.ValueType? retType = isVoid ? null : Enum.Parse<Ast.ValueType>(returnTypeText!, ignoreCase: true);
+            if (!isVoid && _lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<")
+                SkipTypeArgsIfAny();
             if (!isVoid && _lexer.CurrentTokenType == Ast.TokenType.BracketsOpen)
             {
                 ReadArraySuffixes();
@@ -2457,7 +2581,22 @@
                             pType = Ast.ValueType.Array;
 
                     }
-
+                    else if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && TryConsumeTupleReturnSignature())
+                    {
+                        pType = Ast.ValueType.Tuple;
+                    }
+                    else if (_lexer.CurrentTokenType == Ast.TokenType.Identifier 
+                        && string.Equals(_lexer.CurrentTokenText, "Dictionary", StringComparison.Ordinal))
+                    {
+                        pType = Ast.ValueType.Dictionary;
+                        _lexer.NextToken(); // skip Dictionary
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<")
+                            SkipTypeArgsIfAny();
+                        pType = ReadMaybePointer(pType);
+                        pType = ReadMaybeNullable(pType);
+                        var arrInfo = ReadArraySuffixes();
+                        if (arrInfo.isArray) pType = Ast.ValueType.Array;
+                    }
                     var pname = _lexer.CurrentTokenText;
                     Consume(Ast.TokenType.Identifier);
                     if (isParams)
@@ -2672,7 +2811,22 @@
                         var arrInfo = ReadArraySuffixes();
                         if (arrInfo.isArray) pType = Ast.ValueType.Array;
                     }
-
+                    else if (_lexer.CurrentTokenType == Ast.TokenType.ParenOpen && TryConsumeTupleReturnSignature())
+                    {
+                        pType = Ast.ValueType.Tuple;
+                    }
+                    else if (_lexer.CurrentTokenType == Ast.TokenType.Identifier
+                        && string.Equals(_lexer.CurrentTokenText, "Dictionary", StringComparison.Ordinal))
+                    {
+                        pType = Ast.ValueType.Dictionary;
+                        _lexer.NextToken(); // skip Dictionary
+                        if (_lexer.CurrentTokenType == Ast.TokenType.Operator && _lexer.CurrentTokenText == "<")
+                            SkipTypeArgsIfAny();
+                        pType = ReadMaybePointer(pType);
+                        pType = ReadMaybeNullable(pType);
+                        var arrInfo = ReadArraySuffixes();
+                        if (arrInfo.isArray) pType = Ast.ValueType.Array;
+                    }
                     var pname = _lexer.CurrentTokenText;
                     Consume(Ast.TokenType.Identifier);
                     if (isParams)
@@ -2759,6 +2913,35 @@
                     if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
                     {
                         _lexer.NextToken();
+                        if (_lexer.CurrentTokenType == Ast.TokenType.BraceClose) break;
+                        continue;
+                    }
+                    break;
+                }
+            }
+            Consume(Ast.TokenType.BraceClose);
+            return items.ToArray();
+        }
+        private (Ast.AstNode Key, Ast.AstNode Value)[] ParseDictionaryInitializer()
+        {
+            var items = new List<(Ast.AstNode Key, Ast.AstNode Value)>();
+            Consume(Ast.TokenType.BraceOpen);
+            if (_lexer.CurrentTokenType != Ast.TokenType.BraceClose)
+            {
+                while (true)
+                {
+                    Consume(Ast.TokenType.BraceOpen);
+
+                    var key = ParseExpression();
+                    Consume(Ast.TokenType.Comma);
+                    var val = ParseExpression();
+
+                    Consume(Ast.TokenType.BraceClose);
+                    items.Add((key, val));
+
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
+                    {
+                        _lexer.NextToken(); // skip ,
                         if (_lexer.CurrentTokenType == Ast.TokenType.BraceClose) break;
                         continue;
                     }
@@ -3487,7 +3670,9 @@
                 { Ast.ValueType.Object, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Enum, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Struct, (heap, offset) => BitConverter.ToInt32(heap, offset) },
+                { Ast.ValueType.Class, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Nullable, (heap, offset) => BitConverter.ToInt32(heap, offset) },
+                { Ast.ValueType.Dictionary, (heap, offset) => BitConverter.ToInt32(heap, offset) },
                 { Ast.ValueType.Bool, (heap, offset) => heap[offset] != 0 },
                 { Ast.ValueType.Float, (heap, offset) => BitConverter.ToSingle(heap, offset) },
                 { Ast.ValueType.Double, (heap, offset) => BitConverter.ToDouble(heap, offset) },
@@ -3514,7 +3699,8 @@
                 { Ast.ValueType.Object, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Enum, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Struct, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
-                { Ast.ValueType.Nullable, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
+                { Ast.ValueType.Class, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
+                { Ast.ValueType.Dictionary, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Bool, (heap, offset, value) => heap[offset] = (bool)value ? (byte)1 : (byte)0 },
                 { Ast.ValueType.Float, (heap, offset, value) => BitConverter.GetBytes((float)value).CopyTo(heap, offset) },
                 { Ast.ValueType.Double, (heap, offset, value) => BitConverter.GetBytes((double)value).CopyTo(heap, offset) },
@@ -3583,8 +3769,6 @@
                 CollectGarbage();
             }
 
-
-
             public void EnterFunction()
             {
                 if (++_callDepth > MaxCallDepth)
@@ -3615,7 +3799,9 @@
                     case ValueType.IntPtr: return sizeof(int);
                     case ValueType.Enum: return sizeof(int);
                     case ValueType.Nullable: return sizeof(int);
+                    case ValueType.Dictionary: return sizeof(int);
                     case ValueType.Struct: return sizeof(int);
+                    case ValueType.Class: return sizeof(int);
                     case ValueType.Uint: return sizeof(uint);
                     case ValueType.Long: return sizeof(long);
                     case ValueType.Ulong: return sizeof(ulong);
@@ -3678,13 +3864,11 @@
 
                 return -1;
             }
-
             private int AddPin(int addr)
             {
                 _pinned.Add(addr);
                 return addr;
             }
-
             public void Unpin(int key) => _pinned.Remove(key);
             public void CollectGarbage()
             {
@@ -3793,6 +3977,7 @@
                         }
                         return;
                     }
+                    
                     if (vt == ValueType.Struct || (sigPtr >= StackSize && sigPtr < heapEnd && GetHeapObjectType(sigPtr) == ValueType.Byte))
                     {
                         if (!(sigPtr >= StackSize && sigPtr < heapEnd)) return;
@@ -3833,7 +4018,32 @@
                         return;
                     }
                 }
+                if (vt == ValueType.Dictionary)
+                {
+                    if (bytes < 2) return;
+                    var kt = (ValueType)_memory[ptr];
+                    var vt2 = (ValueType)_memory[ptr + 1];
+                    int ks = IsReferenceType(kt) ? sizeof(int) : GetTypeSize(kt);
+                    int vs = IsReferenceType(vt2) ? sizeof(int) : GetTypeSize(vt2);
 
+                    int pos = ptr + 2;
+                    int end = ptr + bytes;
+                    while (pos + ks + vs <= end)
+                    {
+                        if (IsReferenceType(kt))
+                        {
+                            int kptr = BitConverter.ToInt32(_memory, pos);
+                            if (kptr >= StackSize && kptr < heapEnd) Mark(kptr, reachable);
+                        }
+                        if (IsReferenceType(vt2))
+                        {
+                            int vptr = BitConverter.ToInt32(_memory, pos + ks);
+                            if (vptr >= StackSize && vptr < heapEnd) Mark(vptr, reachable);
+                        }
+                        pos += ks + vs;
+                    }
+                    return;
+                }
             }
             public int GetArrayLength(int dataPtr)
             {
@@ -3867,8 +4077,7 @@
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public int GetHeapObjectLength(int addr)
                 => (_memory[addr - HeaderSize] | (_memory[addr - HeaderSize + 1] << 8) | (_memory[addr - HeaderSize + 2] << 16)) - HeaderSize;
-
-
+            
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public Span<byte> GetSpan(int addr)
             {
@@ -3900,6 +4109,16 @@
 
                 src.CopyTo(_memory.AsSpan(addr, src.Length));
             }
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public void WriteBytesAt(int baseAddr, int offset, ReadOnlySpan<byte> src)
+            {
+                int cap = GetHeapObjectLength(baseAddr);
+                if (offset < 0 || src.Length < 0 || offset + src.Length > cap)
+                    throw new ArgumentException("WriteBytesAt: write exceeds object bounds");
+
+                ValidateAddress(baseAddr + offset, src.Length);
+                src.CopyTo(_memory.AsSpan(baseAddr + offset, src.Length));
+            }
             public int Malloc(int size, ValueType valueType, bool isArray = false)
             {
                 if (size < 0) throw new ArgumentException(nameof(size), "Allocation length must be positive");
@@ -3920,7 +4139,188 @@
                 }
 
             }
+            /// <summary>Reallocates memory. If new length is greater then the previous, copies bytes to the new address and frees the old one.</summary>
+            /// <exception cref="ArgumentOutOfRangeException"></exception>
+            public int Realloc(int oldPtr, int newLength)
+            {
+                if (oldPtr < StackSize || oldPtr >= StackSize + _heapend)
+                    throw new ArgumentOutOfRangeException(nameof(oldPtr), "nullptr");
+                var elemType = GetHeapObjectType(oldPtr);
+                bool isArr = IsArray(oldPtr);
+                int oldBytes = GetHeapObjectLength(oldPtr);
+                if (newLength == oldBytes) return oldPtr;
+                int newPtr = Malloc(newLength, elemType, isArray: isArr);
+                if (oldBytes > 0)
+                    _memory.AsSpan(oldPtr, oldBytes).CopyTo(_memory.AsSpan(newPtr, oldBytes));
+                if (newLength > oldBytes)
+                {
+                    var tail = _memory.AsSpan(newPtr + oldBytes, newLength - oldBytes);
+                    if (isArr && IsReferenceType(elemType))
+                        tail.Fill(0xFF);
+                    else
+                        tail.Clear();
+                }
+                RelocateReferences(oldPtr, newPtr);
+                if (newLength > oldBytes) Free(oldPtr);
+                return newPtr;
+                void RelocateReferences(int oldPtr, int newPtr)
+                {
+                    if (oldPtr == newPtr) return;
+                    if (oldPtr < StackSize || oldPtr > StackSize + MemoryUsed || newPtr < StackSize || newPtr > StackSize + MemoryUsed)
+                        throw new ArgumentOutOfRangeException(nameof(oldPtr), "Expect heap data pointers");
+                    if (_pinned.Remove(oldPtr)) _pinned.Add(newPtr);
+                    foreach (var scope in _scopes)
+                    {
+                        foreach (var kv in scope)
+                        {
+                            var v = kv.Value;
+                            if (Ast.IsReferenceType(v.Type) || v.Type == Ast.ValueType.IntPtr || v.Type == Ast.ValueType.Array)
+                            {
+                                int cur = BitConverter.ToInt32(_memory, v.Address);
+                                if (cur == oldPtr)
+                                    BitConverter.GetBytes(newPtr).CopyTo(_memory, v.Address);
+                            }
+                        }
+                    }
+                    int pos = 0;
+                    while (pos < _heapend)
+                    {
+                        int headerPos = pos + StackSize;
+                        int len = GetHeapObjectLength(headerPos + HeaderSize) + HeaderSize;
+                        bool used = IsUsed(headerPos + HeaderSize);
+                        if (used)
+                        {
+                            int ptr = headerPos + HeaderSize;
+                            int bytes = GetHeapObjectLength(ptr);
+                            var vt = GetHeapObjectType(ptr);
+                            bool isArr = IsArray(ptr);
+                            if (vt == Ast.ValueType.Nullable)
+                            {
+                                if (bytes >= 1)
+                                {
+                                    var baseT = (Ast.ValueType)_memory[ptr];
+                                    if (Ast.IsReferenceType(baseT) && bytes >= 1 + sizeof(int))
+                                    {
+                                        int h = BitConverter.ToInt32(_memory, ptr + 1);
+                                        if (h == oldPtr)
+                                            BitConverter.GetBytes(newPtr).CopyTo(_memory, ptr + 1);
+                                    }
+                                }
+                            }
+                            else if (isArr)
+                            {
+                                if (Ast.IsReferenceType(vt))
+                                {
+                                    int count = bytes / sizeof(int);
+                                    for (int i = 0; i < count; i++)
+                                    {
+                                        int at = ptr + i * sizeof(int);
+                                        int h = BitConverter.ToInt32(_memory, at);
+                                        if (h == oldPtr)
+                                            BitConverter.GetBytes(newPtr).CopyTo(_memory, at);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                if (vt == Ast.ValueType.Tuple)
+                                {
+                                    int p = ptr, end = ptr + bytes;
+                                    while (p < end)
+                                    {
+                                        var et = (Ast.ValueType)_memory[p++];
+                                        if (Ast.IsReferenceType(et))
+                                        {
+                                            int h = BitConverter.ToInt32(_memory, p);
+                                            if (h == oldPtr)
+                                                BitConverter.GetBytes(newPtr).CopyTo(_memory, p);
+                                            p += sizeof(int);
+                                        }
+                                        else
+                                        {
+                                            p += GetTypeSize(et);
+                                        }
+                                        // namePtr (string handle)
+                                        int namePtr = BitConverter.ToInt32(_memory, p);
+                                        if (namePtr == oldPtr)
+                                            BitConverter.GetBytes(newPtr).CopyTo(_memory, p);
+                                        p += sizeof(int);
+                                    }
+                                }
+                                else
+                                {
+                                    if (bytes >= sizeof(int))
+                                    {
+                                        int sigPtr = BitConverter.ToInt32(_memory, ptr);
+                                        bool isStructLike = vt == Ast.ValueType.Struct
+                                            || (sigPtr >= StackSize && sigPtr < StackSize + _heapend
+                                            && GetHeapObjectType(sigPtr) == Ast.ValueType.Byte);
+                                        if (isStructLike && sigPtr >= StackSize && sigPtr < StackSize + _heapend)
+                                        {
+                                            int sigLen = GetHeapObjectLength(sigPtr);
+                                            int s = 0;
+                                            int val = ptr + sizeof(int);
+                                            while (s < sigLen)
+                                            {
+                                                if (s + 1 > sigLen) break;
+                                                var declared = (Ast.ValueType)_memory[sigPtr + s++];
+                                                if (s >= sigLen) break;
+                                                int nameLen = _memory[sigPtr + s++];
+                                                s += nameLen;
+                                                if (s >= sigLen) break;
+                                                bool hasInit = _memory[sigPtr + s++] != 0;
+                                                if (hasInit)
+                                                {
+                                                    s += GetTypeSize(declared);
+                                                    if (s > sigLen) break;
+                                                }
+                                                if (val > ptr + bytes) break;
+                                                var instFieldType = (Ast.ValueType)_memory[val++];
+                                                int payloadSize = Ast.IsReferenceType(instFieldType) ? sizeof(int) : GetTypeSize(instFieldType);
 
+                                                if (Ast.IsReferenceType(instFieldType))
+                                                {
+                                                    int h = BitConverter.ToInt32(_memory, val);
+                                                    if (h == oldPtr)
+                                                        BitConverter.GetBytes(newPtr).CopyTo(_memory, val);
+                                                }
+                                                val += payloadSize;
+                                                if (val > ptr + bytes) break;
+                                            }
+                                        }
+                                    }
+                                    if (vt == Ast.ValueType.Dictionary && bytes >= 2)
+                                    {
+                                        var kt = (Ast.ValueType)_memory[ptr];
+                                        var vt2 = (Ast.ValueType)_memory[ptr + 1];
+                                        int ks = Ast.IsReferenceType(kt) ? sizeof(int) : GetTypeSize(kt);
+                                        int vs = Ast.IsReferenceType(vt2) ? sizeof(int) : GetTypeSize(vt2);
+
+                                        int p = ptr + 2, end = ptr + bytes;
+                                        while (p + ks + vs <= end)
+                                        {
+                                            if (Ast.IsReferenceType(kt))
+                                            {
+                                                int kptr = BitConverter.ToInt32(_memory, p);
+                                                if (kptr == oldPtr)
+                                                    BitConverter.GetBytes(newPtr).CopyTo(_memory, p);
+                                            }
+                                            if (Ast.IsReferenceType(vt2))
+                                            {
+                                                int vptr = BitConverter.ToInt32(_memory, p + ks);
+                                                if (vptr == oldPtr)
+                                                    BitConverter.GetBytes(newPtr).CopyTo(_memory, p + ks);
+                                            }
+                                            p += ks + vs;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        pos += len;
+                    }
+                }
+            }
             private void DefragmentFree()
             {
                 int pos = 0;
@@ -4217,6 +4617,159 @@
                 }
             }
             #endregion
+            #region Dictionary
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            public (ValueType keyType, ValueType valueType) GetDictionaryElementTypes(int dictPtr)
+            {
+                ValidateAddress(dictPtr, 2);
+                var kt = (ValueType)RawMemory[dictPtr];
+                var vt = (ValueType)RawMemory[dictPtr + 1];
+                return (kt, vt);
+            }
+            public int GetDictionaryCount(int dictPtr)
+            {
+                var (kt, vt) = GetDictionaryElementTypes(dictPtr);
+                int ks = IsReferenceType(kt) ? sizeof(int) : GetTypeSize(kt);
+                int vs = IsReferenceType(vt) ? sizeof(int) : GetTypeSize(vt);
+                int bytes = GetHeapObjectLength(dictPtr);
+                if (bytes < 2) return 0;
+                int payload = bytes - 2;
+                if (payload < 0) return 0;
+                int step = ks + vs;
+                return step == 0 ? 0 : (payload / step);
+            }
+            public int AllocateDictionary(ValueType keyType, ValueType valueType, IEnumerable<(object? key, object? value)> pairs)
+            {
+                List<(object? key, object? value)> list = (pairs ?? Array.Empty<(object? key, object? value)>()).ToList();
+
+                int ks = IsReferenceType(keyType) ? sizeof(int) : GetTypeSize(keyType);
+                int vs = IsReferenceType(valueType) ? sizeof(int) : GetTypeSize(valueType);
+                int total = 2 + checked(list.Count * (ks + vs));
+
+                int ptr = Malloc(total, ValueType.Dictionary, isArray: false);
+                RawMemory[ptr] = (byte)keyType;
+                RawMemory[ptr + 1] = (byte)valueType;
+
+                int pos = ptr + 2;
+                foreach (var (k, v) in list)
+                {
+                    object? key = k;
+                    object? val = v;
+
+                    if (!Ast.MatchVariableType(key, keyType) && keyType != ValueType.Object)
+                        key = key is null ? null : Cast(key, keyType);
+                    if (!Ast.MatchVariableType(val, valueType) && valueType != ValueType.Object)
+                        val = val is null ? null : Cast(val, valueType);
+                    if (IsReferenceType(keyType))
+                    {
+                        int handle = PackReference(key!, keyType);
+                        BitConverter.GetBytes(handle).CopyTo(RawMemory, pos);
+                    }
+                    else
+                    {
+                        ReadOnlySpan<byte> src = GetSourceBytes(keyType, key!);
+                        src.CopyTo(RawMemory.AsSpan(pos, src.Length));
+                    }
+                    pos += ks;
+                    if (IsReferenceType(valueType))
+                    {
+                        int handle = PackReference(val!, valueType);
+                        BitConverter.GetBytes(handle).CopyTo(RawMemory, pos);
+                    }
+                    else
+                    {
+                        ReadOnlySpan<byte> src = GetSourceBytes(valueType, val!);
+                        src.CopyTo(RawMemory.AsSpan(pos, src.Length));
+                    }
+                    pos += vs;
+                }
+                return ptr;
+            }
+            private static bool KeysEqual(ValueType kt, object? keyRequested, ReadOnlySpan<byte> storedKeyBytes, ExecutionContext ctx)
+            {
+                if (!IsReferenceType(kt))
+                {
+                    if (keyRequested is null) return false;
+                    ReadOnlySpan<byte> rq = ctx.GetSourceBytes(kt, keyRequested);
+                    return rq.SequenceEqual(storedKeyBytes);
+                }
+
+                if (kt == ValueType.String)
+                {
+                    int kptr = BitConverter.ToInt32(storedKeyBytes);
+                    if (kptr <= 0) return keyRequested is null;
+                    string stored = ctx.ReadHeapString(kptr);
+                    return string.Equals(stored, keyRequested?.ToString(), StringComparison.Ordinal);
+                }
+
+                int sptr = BitConverter.ToInt32(storedKeyBytes);
+                int rptr = (keyRequested is int ip) ? ip : -1;
+                return sptr > 0 && rptr > 0 && sptr == rptr;
+            }
+            private int DictionaryFindValueAddress(int dictPtr, object? key, out ValueType valueType)
+            {
+                var (kt, vt) = GetDictionaryElementTypes(dictPtr);
+                valueType = vt;
+
+                int ks = IsReferenceType(kt) ? sizeof(int) : GetTypeSize(kt);
+                int vs = IsReferenceType(vt) ? sizeof(int) : GetTypeSize(vt);
+
+                int bytes = GetHeapObjectLength(dictPtr);
+                int pos = dictPtr + 2;
+                int end = dictPtr + bytes;
+
+                int step = ks + vs;
+                while (pos + step <= end)
+                {
+                    if (KeysEqual(kt, key, RawMemory.AsSpan(pos, ks), this))
+                        return pos + ks;
+                    pos += step;
+                }
+                return -1;
+            }
+            public bool DictionaryContainsKey(int dictPtr, object? key) => DictionaryFindValueAddress(dictPtr, key, out _) >= 0;
+            public object? DictionaryGet(int dictPtr, object? key)
+            {
+                int addr = DictionaryFindValueAddress(dictPtr, key, out var vt);
+                if (addr < 0) throw new KeyNotFoundException("Key not found");
+                if (IsReferenceType(vt))
+                {
+                    int handle = BitConverter.ToInt32(RawMemory, addr);
+                    return vt switch
+                    {
+                        ValueType.String => handle <= 0 ? null : ReadHeapString(handle),
+                        ValueType.Object => handle,
+                        ValueType.Array => handle <= 0 ? null : handle,
+                        ValueType.Struct => handle <= 0 ? null : handle,
+                        ValueType.Tuple => handle <= 0 ? null : handle,
+                        ValueType.Nullable => handle <= 0 ? null : handle,
+                        _ => handle <= 0 ? null : handle
+                    };
+                }
+                else return ReadFromStack(addr, vt);
+            }
+            public void DictionarySetExisting(int dictPtr, object? key, object? value)
+            {
+                int addr = DictionaryFindValueAddress(dictPtr, key, out var vt);
+                if (addr < 0) throw new KeyNotFoundException("Key not found");
+
+                if (!Ast.MatchVariableType(value, vt) && vt != ValueType.Object)
+                    value = value is null ? null : Cast(value, vt);
+                if (IsReferenceType(vt))
+                {
+                    int old = BitConverter.ToInt32(RawMemory, addr);
+                    if (old >= StackSize && old < StackSize + MemoryUsed) Free(old);
+                    int packed = PackReference(value!, vt);
+                    BitConverter.GetBytes(packed).CopyTo(RawMemory, addr);
+                }
+                else
+                {
+                    ReadOnlySpan<byte> src = GetSourceBytes(vt, value);
+                    ValidateAddress(addr, src.Length);
+                    src.CopyTo(RawMemory.AsSpan(addr, src.Length));
+                }
+            }
+            #endregion
             #region Array helpers
             public void ArrayResize(string name, int newLength)
             {
@@ -4229,15 +4782,15 @@
             public int ArrayResize(int oldPtr, int newLength)
             {
                 if (newLength < 0) throw new ArgumentException(nameof(newLength), "Length must be positive");
-                if (oldPtr < StackSize || oldPtr >= _memory.Length - sizeof(int))
+                if (oldPtr < StackSize || oldPtr >= StackSize + MemoryUsed)
                     throw new ArgumentOutOfRangeException(nameof(oldPtr), "nullptr");
                 var elemType = GetHeapObjectType(oldPtr);
                 int elemSize = GetTypeSize(elemType);
+                int requiredBytes = checked(newLength * elemSize);
                 int oldBytes = GetHeapObjectLength(oldPtr);
                 if (elemSize <= 0 || oldBytes % elemSize != 0)
                     throw new ApplicationException("Corrupted array header");
                 int oldLength = oldBytes / elemSize;
-                int requiredBytes = checked(newLength * elemSize);
 
                 if (newLength == oldLength)
                     return oldPtr;
@@ -4267,14 +4820,6 @@
                 }
                 Free(oldPtr);
                 return newPtr;
-            }
-            public void ArrayAdd(string name, object element)
-            {
-                if (Get(name).Type != ValueType.Array)
-                    throw new ApplicationException($"{name} is not an array");
-                int ptr = (int)ReadVariable(name);
-                int newPtr = ArrayAdd(ptr, element);
-                WriteVariable(name, newPtr);
             }
 
             public int ArrayAdd(int ptr, object element)
@@ -4319,26 +4864,11 @@
                 int oldBytes = GetHeapObjectLength(ptr);
                 int oldLength = oldBytes / elemSize;
                 int needBytes = checked((oldLength + 1) * elemSize);
-
-                int newPtr = Malloc(needBytes, elemType, isArray: true);
-                _memory.AsSpan(ptr, oldBytes).CopyTo(_memory.AsSpan(newPtr, oldBytes));
-                _memory.AsSpan(newPtr + oldBytes, needBytes - oldBytes).Clear();
-
-
-
                 ReadOnlySpan<byte> src = GetSourceBytes(element);
-                WriteBytes(newPtr + oldBytes, src);
-                Free(ptr);
-                return newPtr;
-            }
-            public void ArrayAddAt(string varName, int index, object element)
-            {
-                if (Get(varName).Type != ValueType.Array)
-                    throw new ApplicationException($"{varName} is not an array");
+                int newPtr = Realloc(ptr, needBytes);
 
-                int ptr = (int)ReadVariable(varName);
-                int newPtr = ArrayAddAt(ptr, index, element);
-                WriteVariable(varName, newPtr);
+                WriteBytesAt(newPtr, oldBytes, src);
+                return newPtr;
             }
             public int ArrayAddAt(int ptr, int index, object element)
             {
@@ -4348,7 +4878,7 @@
                 int length = bytes / elemSize;
 
                 if (index < 0 || index > length)
-                    throw new ArgumentOutOfRangeException(nameof(index));
+                    throw new ArgumentOutOfRangeException(nameof(index), $"Specified argument '{index}' was out of the range of valid values.");
                 var type = InferType(element);
                 if (type != elemType)
                 {
@@ -4382,17 +4912,15 @@
                 }
 
                 int needBytes = checked((length + 1) * elemSize);
-                int newPtr = Malloc(needBytes, elemType, isArray: true);
-
-                _memory.AsSpan(ptr, index * elemSize).CopyTo(_memory.AsSpan(newPtr, index * elemSize));
-                ReadOnlySpan<byte> src = GetSourceBytes(element);
-                WriteBytes(newPtr + index * elemSize, src);
+                int newPtr = Realloc(ptr, needBytes);
                 int tailBytes = (length - index) * elemSize;
-                _memory.AsSpan(ptr + index * elemSize, tailBytes).CopyTo(_memory.AsSpan(newPtr + (index + 1) * elemSize, tailBytes));
+                if (tailBytes > 0)
+                    _memory.AsSpan(newPtr + index * elemSize, tailBytes)
+                           .CopyTo(_memory.AsSpan(newPtr + (index + 1) * elemSize, tailBytes));
+                ReadOnlySpan<byte> src = GetSourceBytes(element);
+                WriteBytesAt(newPtr, index * elemSize, src);
 
-                Free(ptr);
                 return newPtr;
-
             }
 
 
@@ -6163,9 +6691,10 @@
             }
             return Output;
         }
-        public enum ValueType
+        public enum ValueType : byte
         {
-            Int, String, Bool, Double, Ulong, Uint, Long, Byte, Object, Sbyte, Short, Char, UShort, Float, Decimal, IntPtr, Array, Enum, Nullable, Struct, DateTime, TimeSpan, Tuple
+            Int, Double, Ulong, Uint, Long, Byte, Object, Sbyte, Short, Char, UShort, Float, Decimal, IntPtr, String, Bool, DateTime, TimeSpan,
+            Array, Enum, Nullable, Struct, Class, Tuple, Dictionary
         }
         public enum Associativity { Left, Right }
         public enum OperatorToken
@@ -6332,12 +6861,11 @@
             this.Context.RegisterNative("Length", (Func<int, int>)Context.GetArrayLength);
             this.Context.RegisterNative("Length", (string str) => str.Length);
             this.Context.RegisterNative("Count", (Func<int, int>)Context.GetArrayLength);
+            this.Context.RegisterNative("ContainsKey", (Func<int, object, bool>)Context.DictionaryContainsKey);
             this.Context.RegisterNative("Resize", (Action<string, int>)Context.ArrayResize);
             this.Context.RegisterNative("Resize", (Func<int, int, int>)Context.ArrayResize);
             this.Context.RegisterNative("Array.Resize", (Func<int, int, int>)Context.ArrayResize);
-            this.Context.RegisterNative("Add", (Action<string, object>)Context.ArrayAdd);
             this.Context.RegisterNative("Add", (Func<int, object, int>)Context.ArrayAdd);
-            this.Context.RegisterNative("AddAt", (Action<string, int, object>)Context.ArrayAddAt);
             this.Context.RegisterNative("AddAt", (Func<int, int, object, int>)Context.ArrayAddAt);
             this.Context.RegisterNative("RemoveAt", (Action<string, int>)Context.ArrayRemoveAt);
             this.Context.RegisterNative("RemoveAt", (Func<int, int, int>)Context.ArrayRemoveAt);
@@ -6743,7 +7271,9 @@
             ValueType.IntPtr => value is int,
             ValueType.Nullable => value is null || !IsReferenceType(ExecutionContext.InferType(value)),
             ValueType.Struct => value is int,
+            ValueType.Class => value is int,
             ValueType.Tuple => value is int,
+            ValueType.Dictionary => value is int,
             ValueType.DateTime => value is DateTime,
             ValueType.TimeSpan => value is TimeSpan,
             ValueType.Array => value is ValueTuple<int, ValueType>
@@ -7927,6 +8457,13 @@
                 }
 
                 int basePtr = Convert.ToInt32(arr);
+                var heapType = context.IsArray(basePtr) ? ValueType.Array : context.GetHeapObjectType(basePtr);
+                if (heapType == ValueType.Dictionary)
+                {
+                    var keyObj = IndexExpr.Evaluate(context);
+                    if (FromEnd) throw new ApplicationException("Index from end is not applicable to Dictionary");
+                    return context.DictionaryGet(basePtr, keyObj)!;
+                }
                 int i = Convert.ToInt32(IndexExpr.Evaluate(context));
                 if (FromEnd) i = context.GetArrayLength(basePtr) - i;
                 int addr = ElementAddress(context, basePtr, i, out var vt);
@@ -7954,6 +8491,13 @@
                 }
 
                 int basePtr = Convert.ToInt32(arr);
+                var heapType = context.IsArray(basePtr) ? ValueType.Array : context.GetHeapObjectType(basePtr);
+                if (heapType == ValueType.Dictionary)
+                {
+                    var keyObj = IndexExpr.Evaluate(context);
+                    context.DictionarySetExisting(basePtr, keyObj, value);
+                    return;
+                }
                 int idx = Convert.ToInt32(IndexExpr.Evaluate(context));
                 int addr = ElementAddress(context, basePtr, idx, out var vt);
                 if (value is ValueTuple<int, ValueType>)
@@ -8054,6 +8598,23 @@
                 string child = ind + (last ? "    " : "│   ");
                 foreach (var (n, i) in Items.Select((n, idx) => (idx, n)))
                     i.Print(child, n == Items.Length - 1);
+            }
+        }
+        public sealed class CollectionExpressionNode : Ast.AstNode
+        {
+            public Ast.AstNode[] Items { get; }
+            public CollectionExpressionNode(Ast.AstNode[] items) =>
+                Items = items ?? Array.Empty<Ast.AstNode>();
+
+            public override object Evaluate(ExecutionContext _)
+            {
+                if (Items.Length == 0) return null!;
+                throw new NotImplementedException("Collection expressions are not implemented");
+            }
+                
+            public override void Print(string indent = "", bool isLast = true)
+            {
+                Console.WriteLine($"{indent}└── collection [] ({Items.Length} items)");
             }
         }
         public sealed class TupleLiteralNode : AstNode
@@ -9084,9 +9645,34 @@
         #endregion
 
         #region Function nodes
-        public sealed record GenericInfo(string[] TypeParameters, Dictionary<string, string[]>? Constraints);
-        public sealed record GenericUse(string[] TypeArguments);
-        public sealed record AttributeNode(string Name, string[] Args);
+        public sealed class GenericInfo
+        {
+            public readonly string[] TypeParameters;
+            public Dictionary<string, string[]>? Constraints;
+            public GenericInfo(string[] typeParameters, Dictionary<string, string[]>? constraints)
+            {
+                TypeParameters = typeParameters;
+                Constraints = constraints;
+            }
+        }
+        public sealed class GenericUse
+        {
+            public readonly string[] TypeArguments;
+            public GenericUse(string[] typeArguments)
+            {
+                TypeArguments = typeArguments;
+            }
+        }
+        public sealed class AttributeNode
+        {
+            public readonly string Name; 
+            public readonly string[] Args;
+            public AttributeNode(string name, string[] args)
+            {
+                Name = name;
+                Args = args;
+            }
+        }
         public class FunctionDeclarationNode : Ast.AstNode
         {
             public ValueType? ReturnType; //null is void
@@ -9563,9 +10149,9 @@
             public FunctionDeclarationNode Decl { get; }
             public LambdaNode(FunctionDeclarationNode decl) => Decl = decl;
 
-            public override object Evaluate(ExecutionContext ctx)
+            public override object Evaluate(ExecutionContext context)
             {
-                Decl.Evaluate(ctx);
+                Decl.Evaluate(context);
                 return int.Parse(Decl.Name);
             }
 
@@ -9615,7 +10201,58 @@
                     Console.WriteLine($"{childIndent}└── {m}");
             }
         }
+        public class NewDictionaryNode : Ast.AstNode
+        {
+            public GenericUse Generic { get; }
+            public Ast.AstNode[] CtorArgs { get; }
+            public (Ast.AstNode Key, Ast.AstNode Value)[]? Initializer { get; }
 
+            public NewDictionaryNode(GenericUse generic, Ast.AstNode[] ctorArgs, (Ast.AstNode Key, Ast.AstNode Value)[]? initializer)
+            {
+                Generic = generic;
+                CtorArgs = ctorArgs ?? Array.Empty<Ast.AstNode>();
+                Initializer = initializer;
+            }
+            public override object Evaluate(ExecutionContext context)
+            {
+                context.Check();
+                if (Generic is null || Generic.TypeArguments.Length != 2)
+                    throw new ArgumentException("Dictionary<TK,TV> requires two type arguments");
+                ValueType keyT = Enum.Parse<ValueType>(Generic.TypeArguments[0], true);
+                ValueType valT = Enum.Parse<ValueType>(Generic.TypeArguments[1], true);
+                var pairs = new List<(object? key, object? value)>();
+                if (Initializer is not null)
+                {
+                    foreach (var (kExpr, vExpr) in Initializer)
+                    {
+                        context.Check();
+                        object? k = kExpr.Evaluate(context);
+                        object? v = vExpr.Evaluate(context);
+
+                        if (!Ast.MatchVariableType(k, keyT) && keyT != ValueType.Object)
+                            k = context.Cast(k, keyT);
+                        if (!Ast.MatchVariableType(v, valT) && valT != ValueType.Object)
+                            v = context.Cast(v, valT);
+
+                        pairs.Add((k, v));
+                    }
+                }
+                return context.AllocateDictionary(keyT, valT, pairs);
+            }
+            public override void Print(string indent = "", bool isLast = true)
+            {
+                Console.WriteLine($"{indent}└── new Dictionary<...>");
+                var child = indent + (isLast ? "    " : "│   ");
+                if (CtorArgs.Length > 0)
+                {
+                    Console.WriteLine($"{child}└── ctor-args ({CtorArgs.Length})");
+                }
+                if (Initializer is { Length: > 0 })
+                {
+                    Console.WriteLine($"{child}└── init-pairs ({Initializer.Length})");
+                }
+            }
+        }
         public class ConstructorDeclarationNode : Ast.AstNode
         {
             public readonly string StructName;
