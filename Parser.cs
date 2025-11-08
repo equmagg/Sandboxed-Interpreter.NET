@@ -590,13 +590,32 @@ namespace Interpretor
                             else expr = ParseExpression();
                             Consume(Ast.TokenType.Semicolon);
                             bool isDict = string.Equals(structTypeName, "Dictionary", StringComparison.Ordinal);
-                            if (isDict && expr is Ast.CollectionExpressionNode coll && coll.Items.Length == 0)
+                            if (isDict && expr is Ast.CollectionExpressionNode coll)
                             {
-                                expr = new Ast.NewDictionaryNode(
+                                if (coll.Items.Length == 0)
+                                {
+                                    expr = new Ast.NewDictionaryNode(
+                                        new Ast.GenericUse(leftTypeArgs),
+                                        Array.Empty<Ast.AstNode>(),
+                                        Array.Empty<(Ast.AstNode Key, Ast.AstNode Value)>()
+                                    );
+                                }
+                                else if (coll.IsDictionaryExpr)
+                                {
+                                    if (leftTypeArgs == null || leftTypeArgs.Length != 2)
+                                        throw new ParseException("Dictionary requires exactly 2 generic type arguments on the left side.");
+                                    if ((coll.Items.Length & 1) != 0)
+                                        throw new ParseException("Dictionary collection expression must contain key:value pairs.");
+
+                                    var pairs = new List<(Ast.AstNode Key, Ast.AstNode Value)>(coll.Items.Length / 2);
+                                    for (int i = 0; i < coll.Items.Length; i += 2)
+                                        pairs.Add((coll.Items[i], coll.Items[i + 1]));
+                                    expr = new Ast.NewDictionaryNode(
                                     new Ast.GenericUse(leftTypeArgs),
                                     Array.Empty<Ast.AstNode>(),
-                                    Array.Empty<(Ast.AstNode Key, Ast.AstNode Value)>()
-                                );
+                                    pairs.ToArray()
+                            );
+                                }
                             }
                             bool isPublic = mods is not null && mods.Contains("public");
                             if (mods != null)
@@ -713,13 +732,32 @@ namespace Interpretor
                     else expr = ParseExpression();
                     Consume(Ast.TokenType.Semicolon);
                     bool isDict = string.Equals(structTypeName, "Dictionary", StringComparison.Ordinal);
-                    if (isDict && expr is Ast.CollectionExpressionNode coll && coll.Items.Length == 0)
+                    if (isDict && expr is Ast.CollectionExpressionNode coll)
                     {
-                        expr = new Ast.NewDictionaryNode(
+                        if (coll.Items.Length == 0)
+                        {
+                            expr = new Ast.NewDictionaryNode(
+                                new Ast.GenericUse(leftTypeArgs),
+                                Array.Empty<Ast.AstNode>(),
+                                Array.Empty<(Ast.AstNode Key, Ast.AstNode Value)>()
+                            );
+                        }
+                        else if (coll.IsDictionaryExpr)
+                        {
+                            if (leftTypeArgs == null || leftTypeArgs.Length != 2)
+                                throw new ParseException("Dictionary requires exactly 2 generic type arguments on the left side.");
+                            if ((coll.Items.Length & 1) != 0)
+                                throw new ParseException("Dictionary collection expression must contain key:value pairs.");
+
+                            var pairs = new List<(Ast.AstNode Key, Ast.AstNode Value)>(coll.Items.Length / 2);
+                            for (int i = 0; i < coll.Items.Length; i += 2)
+                                pairs.Add((coll.Items[i], coll.Items[i + 1]));
+                            expr = new Ast.NewDictionaryNode(
                             new Ast.GenericUse(leftTypeArgs),
                             Array.Empty<Ast.AstNode>(),
-                            Array.Empty<(Ast.AstNode Key, Ast.AstNode Value)>()
-                        );
+                            pairs.ToArray()
+                    );
+                        }
                     }
                     var declType = isDict ? Ast.ValueType.Dictionary : Ast.ValueType.Struct;
                     return new Ast.VariableDeclarationNode(declType, name, expr, isArray: false, isConst: false, isPublic: false, innerType: null)
@@ -1558,6 +1596,25 @@ namespace Interpretor
                         }
                         return new Ast.NewArrayNode(rank > 1 ? Ast.ValueType.Array : elemType, sizes.ToArray());
                     }
+                    if (_lexer.CurrentTokenText == "stackalloc")
+                    {
+                        _lexer.NextToken(); // skip stackalloc
+
+                        if (!IsTypeKeyword(_lexer.CurrentTokenText) || _lexer.CurrentTokenText == "var")
+                            throw new ParseException("Element type expected after 'stackalloc'");
+
+                        var elemType = Enum.Parse<Ast.ValueType>(_lexer.CurrentTokenText, true);
+                        _lexer.NextToken(); // skip type
+
+                        elemType = ReadMaybePointer(elemType);
+                        elemType = ReadMaybeNullable(elemType);
+
+                        Consume(Ast.TokenType.BracketsOpen);
+                        var lenExpr = ParseExpression();
+                        Consume(Ast.TokenType.BracketsClose);
+
+                        return new Ast.StackallocNode(elemType, lenExpr);
+                    }
                     if (_lexer.CurrentTokenText == "nameof")
                     {
                         _lexer.NextToken();
@@ -1627,11 +1684,27 @@ namespace Interpretor
                     {
                         _lexer.NextToken();//skip [
                         var items = new List<Ast.AstNode>();
+                        bool dict = false;
                         if (_lexer.CurrentTokenType != Ast.TokenType.BracketsClose)
                         {
                             while (true)
                             {
-                                items.Add(ParseExpression());
+                                var first = ParseExpression();
+
+                                if (_lexer.CurrentTokenType == Ast.TokenType.Colon)
+                                {
+                                    dict = true;
+                                    _lexer.NextToken(); // skip :
+                                    var value = ParseExpression();
+                                    items.Add(first);
+                                    items.Add(value);
+                                }
+                                else
+                                {
+                                    if (dict)
+                                        throw new ParseException("Expected ':' in dictionary element");
+                                    items.Add(first);
+                                }
                                 if (_lexer.CurrentTokenType == Ast.TokenType.Comma)
                                 {
                                     _lexer.NextToken();
@@ -1642,7 +1715,7 @@ namespace Interpretor
                             }
                         }
                         Consume(Ast.TokenType.BracketsClose);
-                        return new Ast.CollectionExpressionNode(items.ToArray());
+                        return new Ast.CollectionExpressionNode(items.ToArray(), dict);
                     }
                 case Ast.TokenType.Identifier:
                     {
@@ -1721,8 +1794,16 @@ namespace Interpretor
                             {
                                 while (true)
                                 {
-                                    string? maybeName = null;
-                                    if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "ref")
+                                    {
+                                        _lexer.NextToken(); // skip ref
+                                        if (sawNamed)
+                                            throw new ApplicationException("'ref' argument cannot appear after named argument.");
+                                        var targetExpr = ParseExpression();
+                                        args.Add(new Ast.UnaryOpNode(Ast.OperatorToken.AddressOf, targetExpr));
+                                        argNames.Add(null);
+                                    }
+                                    else if (_lexer.CurrentTokenType == Ast.TokenType.Identifier)
                                     {
                                         int savePos = _lexer.Position;
                                         var saveType = _lexer.CurrentTokenType;
@@ -1734,9 +1815,8 @@ namespace Interpretor
                                         {
                                             sawNamed = true;
                                             _lexer.NextToken(); // skip :
-                                            maybeName = candidate;
                                             var valueExpr = ParseExpression();
-                                            argNames.Add(maybeName);
+                                            argNames.Add(candidate);
                                             args.Add(valueExpr);
                                         }
                                         else

@@ -126,7 +126,6 @@
                 Associativity = associativity;
             }
         }
-        
         public static bool TryGetOperatorInfo(OperatorToken token, out OperatorInfo? info) =>
         _operatorTable.TryGetValue(token, out info);
 
@@ -1813,6 +1812,40 @@
                 Console.WriteLine($"{indent}└── var {Name}");
             }
         }
+        #region Collections
+        public class StackallocNode : AstNode
+        {
+            public ValueType ElementType { get; }
+            public AstNode LengthExpr { get; }
+            public StackallocNode(ValueType elementType, AstNode lengthExpr)
+            {
+                ElementType = elementType;
+                LengthExpr = lengthExpr;
+            }
+            public override object Evaluate(ExecutionContext context)
+            {
+                context.Check();
+
+                int len = Convert.ToInt32(LengthExpr.Evaluate(context), CultureInfo.InvariantCulture);
+                if (len < 0) throw new ApplicationException("stackalloc length must be non-negative");
+                int elemSize = context.GetTypeSize(ElementType);
+                int bytes = checked(len * elemSize);
+
+                int basePtr = context.Malloc(bytes, ElementType, isArray: true);
+                if (Ast.IsReferenceType(ElementType))
+                    context.RawMemory.AsSpan(basePtr, bytes).Fill(0xFF);
+                else
+                    context.RawMemory.AsSpan(basePtr, bytes).Clear();
+
+                return basePtr;
+            }
+            public override void Print(string indent = "", bool isLast = true)
+            {
+                Console.WriteLine($"{indent}└── stackalloc {ElementType.ToString().ToLower()}[]");
+                string ci = indent + (isLast ? "    " : "│   ");
+                LengthExpr.Print(ci, true);
+            }
+        }
         public class NewArrayNode : AstNode
         {
             public ValueType ElementType { get; }
@@ -2067,11 +2100,15 @@
                     i.Print(child, n == Items.Length - 1);
             }
         }
-        public sealed class CollectionExpressionNode : Ast.AstNode
+        public class CollectionExpressionNode : Ast.AstNode
         {
             public Ast.AstNode[] Items { get; }
-            public CollectionExpressionNode(Ast.AstNode[] items) =>
+            public bool IsDictionaryExpr { get; }
+            public CollectionExpressionNode(Ast.AstNode[] items, bool dictExpr = false)
+            {
                 Items = items ?? Array.Empty<Ast.AstNode>();
+                IsDictionaryExpr = dictExpr;
+            }
 
             public override object Evaluate(ExecutionContext context)
             {
@@ -2132,10 +2169,10 @@
 
             public override void Print(string indent = "", bool isLast = true)
             {
-                Console.WriteLine($"{indent}└── collection [] ({Items.Length} items)");
+                Console.WriteLine($"{indent}└── collection [] ({Items.Length} items){(IsDictionaryExpr ? " (dict)" : "")}");
             }
         }
-        public sealed class TupleLiteralNode : AstNode
+        public class TupleLiteralNode : AstNode
         {
             public readonly (string? name, AstNode expr)[] Items;
             public TupleLiteralNode((string? name, AstNode expr)[] items) => Items = items;
@@ -2170,6 +2207,7 @@
 
             }
         }
+        #endregion
         public class LiteralNode : AstNode
         {
             public object? Value { get; }
@@ -2210,7 +2248,7 @@
             }
         }
 
-        public sealed class TupleTargetNode : AstNode
+        public class TupleTargetNode : AstNode
         {
             public readonly string[] Names;
             public TupleTargetNode(IEnumerable<string> names) => Names = names.ToArray();
@@ -4046,7 +4084,7 @@
                 ParamsIndex = paramsIndex;
             }
 
-            public override object Evaluate(ExecutionContext context)
+            public override object Evaluate(Ast.ExecutionContext context)
             {
                 context.Check();
                 var fn = new ExecutionContext.Function

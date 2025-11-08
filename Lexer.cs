@@ -12,8 +12,6 @@ namespace Interpretor
         public char GetAtPosition(int pos) => _text[pos];
         public Ast.TokenType CurrentTokenType { get; private set; }
         public string CurrentTokenText { get; private set; } = string.Empty;
-
-        
         public void ResetCurrent(int pos, Ast.TokenType token, string text)
         {
             _position = pos;
