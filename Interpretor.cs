@@ -787,7 +787,7 @@
             public abstract void Print(string indent = "", bool isLast = true);
         }
         #region Operator Nodes
-        public class UnaryOpNode : AstNode
+        public sealed class UnaryOpNode : AstNode
         {
             public OperatorToken Op { get; }
             public AstNode Operand { get; }
@@ -916,7 +916,7 @@
                 Operand.Print(childIndent, true);
             }
         }
-        public class BinOpNode : AstNode
+        public sealed class BinOpNode : AstNode
         {
             public AstNode Left { get; }
             public OperatorToken Op { get; }
@@ -1492,7 +1492,7 @@
                 Right.Print(childIndent, true);
             }
         }
-        public class AsNode : AstNode
+        public sealed class AsNode : AstNode
         {
             public ValueType Target;
             public AstNode Expr;
@@ -1558,7 +1558,34 @@
         }
         #endregion
         #region Variable nodes
-        public class VariableDeclarationNode : AstNode
+        public sealed class OutNode : AstNode
+        {
+            public readonly string Name;
+            public readonly ValueType DeclaredType;
+            public OutNode(string name, ValueType declaredType)
+            {
+                Name = name;
+                DeclaredType = declaredType;
+            }
+            public override object Evaluate(ExecutionContext ctx)
+            {
+                ctx.Check();
+
+                if (!ctx.HasVariable(Name))
+                {
+                    var t = DeclaredType;
+                    ctx.Declare(Name, t, null);
+                }
+
+                var v = ctx.Get(Name);
+                return v.Address;
+            }
+            public override void Print(string indent = "", bool isLast = true)
+            {
+                Console.WriteLine($"{indent}└── out {DeclaredType.ToString().ToLower() ?? "var"} {Name}");
+            }
+        }
+        public sealed class VariableDeclarationNode : AstNode
         {
             public string Name { get; }
             public ValueType Type { get; }
@@ -1701,7 +1728,7 @@
             }
 
         }
-        public class VariableReferenceNode : AstNode
+        public sealed class VariableReferenceNode : AstNode
         {
             public string Name { get; }
             public VariableReferenceNode(string name) => Name = name;
@@ -1813,7 +1840,7 @@
             }
         }
         #region Collections
-        public class StackallocNode : AstNode
+        public sealed class StackallocNode : AstNode
         {
             public ValueType ElementType { get; }
             public AstNode LengthExpr { get; }
@@ -1846,7 +1873,7 @@
                 LengthExpr.Print(ci, true);
             }
         }
-        public class NewArrayNode : AstNode
+        public sealed class NewArrayNode : AstNode
         {
             public ValueType ElementType { get; }
             public AstNode[] LengthExprs { get; }
@@ -1923,7 +1950,7 @@
                     len.Print(indent + (last ? "    " : "│   "), true);
             }
         }
-        public class ArrayIndexNode : AstNode
+        public sealed class ArrayIndexNode : AstNode
         {
             public AstNode ArrayExpr { get; }
             public AstNode IndexExpr { get; }
@@ -2048,7 +2075,7 @@
                 IndexExpr.Print(ci, true);
             }
         }
-        public class ArrayLiteralNode : AstNode
+        public sealed class ArrayLiteralNode : AstNode
         {
             public ValueType ElementType { get; set; }
             public AstNode[] Items { get; }
@@ -2100,7 +2127,7 @@
                     i.Print(child, n == Items.Length - 1);
             }
         }
-        public class CollectionExpressionNode : Ast.AstNode
+        public sealed class CollectionExpressionNode : Ast.AstNode
         {
             public Ast.AstNode[] Items { get; }
             public bool IsDictionaryExpr { get; }
@@ -2172,7 +2199,7 @@
                 Console.WriteLine($"{indent}└── collection [] ({Items.Length} items){(IsDictionaryExpr ? " (dict)" : "")}");
             }
         }
-        public class TupleLiteralNode : AstNode
+        public sealed class TupleLiteralNode : AstNode
         {
             public readonly (string? name, AstNode expr)[] Items;
             public TupleLiteralNode((string? name, AstNode expr)[] items) => Items = items;
@@ -2208,7 +2235,7 @@
             }
         }
         #endregion
-        public class LiteralNode : AstNode
+        public sealed class LiteralNode : AstNode
         {
             public object? Value { get; }
 
@@ -2227,7 +2254,7 @@
             }
 
         }
-        public class CastNode : AstNode
+        public sealed class CastNode : AstNode
         {
             public ValueType Target;
             public AstNode Expr;
@@ -2248,7 +2275,7 @@
             }
         }
 
-        public class TupleTargetNode : AstNode
+        public sealed class TupleTargetNode : AstNode
         {
             public readonly string[] Names;
             public TupleTargetNode(IEnumerable<string> names) => Names = names.ToArray();
@@ -2262,7 +2289,7 @@
 
         #region Flow control nodes
         #region Loop nodes
-        public class WhileNode : AstNode
+        public sealed class WhileNode : AstNode
         {
             public Ast.AstNode Condition { get; }
             public Ast.AstNode Body { get; }
@@ -2314,7 +2341,7 @@
                 Body.Print(childIndent, true);
             }
         }
-        public class DoWhileNode : Ast.AstNode
+        public sealed class DoWhileNode : Ast.AstNode
         {
             public Ast.AstNode Body { get; }
             public Ast.AstNode Condition { get; }
@@ -2361,7 +2388,7 @@
                 Condition.Print(childIndent, true);
             }
         }
-        public class ForNode : Ast.AstNode
+        public sealed class ForNode : Ast.AstNode
         {
             public Ast.AstNode Init { get; }
             public Ast.AstNode Condition { get; }
@@ -2427,7 +2454,7 @@
                 Body.Print(childIndent, true);
             }
         }
-        public class ForeachNode : AstNode
+        public sealed class ForeachNode : AstNode
         {
             public string[] Names { get; }
             public ValueType[]? DeclaredTypes { get; }
@@ -2594,7 +2621,7 @@
         }
 
         #endregion
-        public class IfNode : AstNode
+        public sealed class IfNode : AstNode
         {
             public AstNode Condition { get; }
             public AstNode ThenBody { get; }
@@ -2634,7 +2661,7 @@
             }
 
         }
-        public class ConditionalNode : AstNode
+        public sealed class ConditionalNode : AstNode
         {
             public AstNode Condition, IfTrue, IfFalse;
             public ConditionalNode(AstNode cond, AstNode t, AstNode f)
@@ -2657,7 +2684,7 @@
                 IfFalse.Print(ci, true);
             }
         }
-        public class TryCatchNode : AstNode
+        public sealed class TryCatchNode : AstNode
         {
             public AstNode TryBlock, CatchBlock, FinallyBlock;
             public string? ExVar;
@@ -2715,7 +2742,7 @@
 
             }
         }
-        public class SwitchNode : AstNode
+        public sealed class SwitchNode : AstNode
         {
             public AstNode Discriminant;
             public List<(PatternNode? pattern, AstNode? value, List<AstNode> body)> Cases;
@@ -2837,7 +2864,7 @@
                 }
             }
         }
-        public class ThrowNode : AstNode
+        public sealed class ThrowNode : AstNode
         {
             public AstNode? Expr;
             public ThrowNode(AstNode? expr) => Expr = expr;
@@ -2855,7 +2882,7 @@
             public override void Print(string indent = "", bool isLast = true)
             { Console.WriteLine($"{indent}└── throw"); Expr?.Print(indent + (isLast ? "    " : "│   ")); }
         }
-        public class LabelNode : AstNode
+        public sealed class LabelNode : AstNode
         {
             public string Name { get; }
 
@@ -2872,7 +2899,7 @@
             }
 
         }
-        public class GotoNode : AstNode
+        public sealed class GotoNode : AstNode
         {
             public string TargetLabel { get; }
 
@@ -2911,7 +2938,7 @@
         {
             public RethrowException() : base("rethrow outside of catch") { }
         }
-        public class ReturnSignal
+        public sealed class ReturnSignal
         {
             public object? Value;
             public int PinKey;
@@ -2930,23 +2957,23 @@
                 Value = value; IsDefault = isDefault;
             }
         }
-        public class BreakSignal { }
-        public class ContinueSignal { }
+        public sealed class BreakSignal { }
+        public sealed class ContinueSignal { }
         #endregion
         #region Signal nodes
-        public class BreakNode : AstNode
+        public sealed class BreakNode : AstNode
         {
             public override object Evaluate(ExecutionContext _) => new BreakSignal();
             public override void Print(string i = "", bool l = true) =>
                 Console.WriteLine($"{i}└── break");
         }
-        public class ContinueNode : AstNode
+        public sealed class ContinueNode : AstNode
         {
             public override object Evaluate(ExecutionContext _) => new ContinueSignal();
             public override void Print(string i = "", bool l = true) =>
                 Console.WriteLine($"{i}└── continue");
         }
-        public class ReturnNode : AstNode
+        public sealed class ReturnNode : AstNode
         {
             public AstNode? Expression;
             public ReturnNode(AstNode? expr) => Expression = expr;
@@ -2968,7 +2995,7 @@
         #endregion
         #endregion
         #region Structure nodes
-        public class StatementListNode : AstNode
+        public sealed class StatementListNode : AstNode
         {
             public List<AstNode> Statements { get; }
 
@@ -3023,7 +3050,7 @@
             }
 
         }
-        public class BlockNode : AstNode
+        public sealed class BlockNode : AstNode
         {
             public List<AstNode> Statements { get; }
             private readonly bool _requiresScope;
@@ -3189,7 +3216,7 @@
             }
 
         }
-        public class UsingNode : AstNode
+        public sealed class UsingNode : AstNode
         {
             public AstNode Declaration { get; }
             public AstNode? Body { get; }
@@ -3260,7 +3287,7 @@
             public override void Print(string indent = "", bool l = true) =>
                 Console.WriteLine($"{indent}└── using");
         }
-        public class NamespaceDeclarationNode : Ast.AstNode
+        public sealed class NamespaceDeclarationNode : Ast.AstNode
         {
             public string FullName { get; }
             public AstNode[] Members { get; }
@@ -3288,7 +3315,7 @@
                     Members[i].Print(childIndent, i == Members.Length - 1);
             }
         }
-        public class UnresolvedReferenceNode : AstNode
+        public sealed class UnresolvedReferenceNode : AstNode
         {
             public AstNode? Target { get; }
             public List<string> Parts { get; }
@@ -3474,7 +3501,7 @@
                 Args = args;
             }
         }
-        public class FunctionDeclarationNode : Ast.AstNode
+        public sealed class FunctionDeclarationNode : Ast.AstNode
         {
             public ValueType? ReturnType; //null is void
             public string Name;
@@ -3521,7 +3548,7 @@
             }
 
         }
-        public class CallNode : AstNode
+        public sealed class CallNode : AstNode
         {
             public string Name;
             public AstNode[] Args;
@@ -3941,7 +3968,7 @@
             }
 
         }
-        public class LambdaNode : AstNode
+        public sealed class LambdaNode : AstNode
         {
             public FunctionDeclarationNode Decl { get; }
             public LambdaNode(FunctionDeclarationNode decl) => Decl = decl;
@@ -3961,7 +3988,7 @@
 
         #endregion
         #region Structure objects nodes
-        public class EnumDeclarationNode : AstNode
+        public sealed class EnumDeclarationNode : AstNode
         {
             public readonly struct Member
             {
@@ -4002,7 +4029,7 @@
                     Console.WriteLine($"{childIndent}└── {m}");
             }
         }
-        public class NewDictionaryNode : Ast.AstNode
+        public sealed class NewDictionaryNode : Ast.AstNode
         {
             public GenericUse Generic { get; }
             public Ast.AstNode[] CtorArgs { get; }
@@ -4054,7 +4081,7 @@
                 }
             }
         }
-        public class ConstructorDeclarationNode : Ast.AstNode
+        public sealed class ConstructorDeclarationNode : Ast.AstNode
         {
             public readonly string StructName;
             public readonly string[] ParamNames;
@@ -4109,7 +4136,7 @@
                 Body.Print(indent + (last ? "    " : "│   "), true);
             }
         }
-        public class StructDeclarationNode : AstNode
+        public sealed class StructDeclarationNode : AstNode
         {
             public string Name { get; }
             public string[] Modifiers { get; }
@@ -4182,7 +4209,7 @@
             }
 
         }
-        public class NewStructNode : Ast.AstNode
+        public sealed class NewStructNode : Ast.AstNode
         {
             private readonly string _structName;
             public Ast.AstNode[] Args { get; }
@@ -4329,7 +4356,7 @@
                     Args[i].Print(childIndent, i == Args.Length - 1);
             }
         }
-        public class ClassDeclarationNode : AstNode
+        public sealed class ClassDeclarationNode : AstNode
         {
             public string Name { get; }
             public string[] Modifiers { get; }
@@ -4351,8 +4378,7 @@
                     Members[i].Print(ch, i == Members.Length - 1);
             }
         }
-
-        public class InterfaceDeclarationNode : AstNode
+        public sealed class InterfaceDeclarationNode : AstNode
         {
             public string Name { get; }
             public string[] Modifiers { get; }

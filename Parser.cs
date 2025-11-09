@@ -1794,7 +1794,26 @@ namespace Interpretor
                             {
                                 while (true)
                                 {
-                                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "ref")
+                                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "out")
+                                    {
+                                        _lexer.NextToken(); //skip out
+                                        bool isVar = _lexer.CurrentTokenText == "var";
+                                        if (isVar)
+                                        {
+                                            throw new ParseException("out parameter has to be explicitly declared.");
+                                        }
+
+                                        var type = Enum.Parse<Ast.ValueType>(_lexer.CurrentTokenText, true);
+                                        _lexer.NextToken(); //skip type
+                                        (bool isArr, _) = ReadArraySuffixes();
+                                        if (isArr) type = Ast.ValueType.Array;
+                                        type = ReadMaybePointer(type);
+                                        string varName = _lexer.CurrentTokenText;
+                                        Consume(Ast.TokenType.Identifier);
+                                        args.Add(new Ast.OutNode(varName, type));
+                                        argNames.Add(null);
+                                    }
+                                    else if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "ref")
                                     {
                                         _lexer.NextToken(); // skip ref
                                         if (sawNamed)
@@ -2333,16 +2352,25 @@ namespace Interpretor
                 {
                     bool isParams = false;
                     bool isRef = false;
-                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "params")
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword)
                     {
-                        isParams = true;
-                        _lexer.NextToken(); //skip params
-                    }
-                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "ref")
-                    {
-                        isRef = true;
-                        _lexer.NextToken(); // skip ref
-                        if (isParams) throw new ParseException("'params' cannot be combined with 'ref'.");
+                        if (_lexer.CurrentTokenText == "params")
+                        {
+                            isParams = true;
+                            _lexer.NextToken(); //skip params
+                        }
+                        if (_lexer.CurrentTokenText == "ref")
+                        {
+                            isRef = true;
+                            _lexer.NextToken(); // skip ref
+                            if (isParams) throw new ParseException("'params' cannot be combined with 'ref'.");
+                        }
+                        if (_lexer.CurrentTokenText == "out")
+                        {
+                            isRef = true;
+                            _lexer.NextToken(); // skip out
+                            if (isParams) throw new ParseException("'params' cannot be combined with 'out'.");
+                        }
                     }
                     var pType = Ast.ValueType.Object;
                     if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText))
@@ -2573,16 +2601,23 @@ namespace Interpretor
                 {
                     bool isParams = false;
                     bool isRef = false;
-                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "params")
+                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword)
                     {
-                        isParams = true;
-                        _lexer.NextToken(); //skip params
-                    }
-                    if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "ref")
-                    {
-                        isRef = true;
-                        _lexer.NextToken(); // skip ref
-                        if (isParams) throw new ParseException("'params' cannot be combined with 'ref'.");
+                        if (_lexer.CurrentTokenText == "params")
+                        {
+                            isParams = true;
+                            _lexer.NextToken(); //skip params
+                        }
+                        if (_lexer.CurrentTokenText == "ref")
+                        {
+                            isRef = true;
+                            _lexer.NextToken(); // skip ref
+                            if (isParams) throw new ParseException("'params' cannot be combined with 'ref'.");
+                        }
+                        if (_lexer.CurrentTokenText == "out")
+                        {
+                            throw new ParseException("'out' modifier cannot be inside a constructor.");
+                        }
                     }
                     var pType = Ast.ValueType.Object;
                     if (_lexer.CurrentTokenType == Ast.TokenType.Keyword && IsTypeKeyword(_lexer.CurrentTokenText))
