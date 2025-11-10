@@ -141,7 +141,12 @@ namespace Interpretor
                 while (_position < _text.Length && (char.IsLetterOrDigit(_text[_position]) || _text[_position] == '_'))
                     _position++;
                 CurrentTokenText = _text.Substring(start, _position - start);
-                CurrentTokenType = Keywords.Contains(CurrentTokenText) ? Ast.TokenType.Keyword : Ast.TokenType.Identifier;
+                bool isKeyword = Keywords.Contains(CurrentTokenText);
+                bool followedByDot = _position < _text.Length && _text[_position] == '.';
+                if (!isKeyword || followedByDot)
+                    CurrentTokenType = Ast.TokenType.Identifier;
+                else
+                    CurrentTokenType = Ast.TokenType.Keyword;
                 return;
             }
             //Combined string

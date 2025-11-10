@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Interpretor
@@ -176,6 +177,9 @@ namespace Interpretor
                 { Ast.ValueType.Decimal,(heap, offset)=>BitConverter.ToUInt32(heap, offset)},
                 { Ast.ValueType.DateTime, (heap, offset) => new DateTime(BitConverter.ToInt64(heap, offset), DateTimeKind.Unspecified) },
                 { Ast.ValueType.TimeSpan, (heap, offset) => new TimeSpan(BitConverter.ToInt64(heap, offset)) },
+                { Ast.ValueType.Point,   (mem, off) => new System.Drawing.Point(BitConverter.ToInt32(mem, off + 0), BitConverter.ToInt32(mem, off + 4)) },
+                { Ast.ValueType.Vector3, (mem, off) => new System.Numerics.Vector3(BitConverter.ToSingle(mem, off + 0),
+                    BitConverter.ToSingle(mem, off + 4), BitConverter.ToSingle(mem, off + 8)) },
             };
 
             private static readonly Dictionary<Ast.ValueType, Action<byte[], int, object>> typeWriters = new()
@@ -205,6 +209,10 @@ namespace Interpretor
                 { Ast.ValueType.Decimal, (heap, offset, value) => BitConverter.GetBytes((int)value).CopyTo(heap, offset) },
                 { Ast.ValueType.DateTime, (heap, offset, value) => BitConverter.GetBytes(((DateTime)value).Ticks).CopyTo(heap, offset) },
                 { Ast.ValueType.TimeSpan, (heap, offset, value) => BitConverter.GetBytes(((TimeSpan)value).Ticks).CopyTo(heap, offset) },
+                { Ast.ValueType.Point, (mem, off, value) => { var p = value is System.Drawing.Point pt ? pt : throw new InvalidCastException("Point expected");
+                    BitConverter.GetBytes(p.X).CopyTo(mem, off + 0); BitConverter.GetBytes(p.Y).CopyTo(mem, off + 4); } },
+                { Ast.ValueType.Vector3, (mem, off, value) => {var v = value is System.Numerics.Vector3 vv ? vv : throw new InvalidCastException("Vector3 expected");
+                BitConverter.GetBytes(v.X).CopyTo(mem, off + 0); BitConverter.GetBytes(v.Y).CopyTo(mem, off + 4); BitConverter.GetBytes(v.Z).CopyTo(mem, off + 8);} }
             };
             public object ReadFromStack(int addr, ValueType vt)
             {
@@ -316,6 +324,8 @@ namespace Interpretor
                     case ValueType.Sbyte: return sizeof(sbyte);
                     case ValueType.DateTime: return sizeof(long);
                     case ValueType.TimeSpan: return sizeof(long);
+                    case ValueType.Point: return sizeof(long);
+                    case ValueType.Vector3: return sizeof(float) * 3;
                     default: throw new ApplicationException($"Unsupported type {type}");
                 }
             }
@@ -2131,6 +2141,8 @@ namespace Interpretor
                 Ast.ValueType.IntPtr => 0,
                 Ast.ValueType.DateTime => new DateTime(0),
                 Ast.ValueType.TimeSpan => new TimeSpan(0),
+                Ast.ValueType.Point => new System.Drawing.Point(0, 0),
+                Ast.ValueType.Vector3 => new System.Numerics.Vector3(0f, 0f, 0f),
                 _ => null
             };
             public object? DerefReference(int addr, ValueType vt)
@@ -2177,7 +2189,74 @@ namespace Interpretor
                     src.CopyTo(_memory.AsSpan(addr, src.Length));
                 }
             }
+            public int PackArray(object?[] values, ValueType elementType)
+            {
+                if (values is null) throw new ArgumentNullException(nameof(values));
 
+                if (IsReferenceType(elementType))
+                {
+                    int basePtr = Malloc(sizeof(int) * values.Length, elementType, isArray: true);
+                    for (int i = 0; i < values.Length; i++)
+                    {
+                        int packed = values[i] switch
+                        {
+                            null => -1,
+                            string s when elementType == ValueType.String
+                                => PackReference(s, ValueType.String),
+                            int p when elementType is ValueType.Array
+                                                or ValueType.IntPtr
+                                                or ValueType.Struct
+                                                or ValueType.Class
+                                                or ValueType.Tuple
+                                                or ValueType.Dictionary
+                                => p, // already a heap pointer
+                            _ => PackReference(values[i]!, elementType)
+                        };
+                        BitConverter.GetBytes(packed).CopyTo(RawMemory, basePtr + i * sizeof(int));
+                    }
+                    return basePtr;
+                }
+                else
+                {
+                    int elemSize = GetTypeSize(elementType);
+                    int basePtr = Malloc(elemSize * values.Length, elementType, isArray: true);
+                    for (int i = 0; i < values.Length; i++)
+                    {
+                        ReadOnlySpan<byte> src = GetSourceBytes(elementType, values[i]!);
+                        src.CopyTo(RawMemory.AsSpan(basePtr + i * elemSize, elemSize));
+                    }
+                    return basePtr;
+                }
+
+            }
+            public int PackArray(ReadOnlySpan<int> values)
+            {
+                int elemSize = GetTypeSize(ValueType.Int);
+                int basePtr = Malloc(elemSize * values.Length, ValueType.Int, isArray: true);
+                MemoryMarshal.AsBytes(values).CopyTo(RawMemory.AsSpan(basePtr, elemSize * values.Length));
+                return basePtr;
+            }
+            public int PackArray(ReadOnlySpan<ulong> values)
+            {
+                int elemSize = GetTypeSize(ValueType.Ulong);
+                int basePtr = Malloc(elemSize * values.Length, ValueType.Ulong, isArray: true);
+                MemoryMarshal.AsBytes(values).CopyTo(RawMemory.AsSpan(basePtr, elemSize * values.Length));
+                return basePtr;
+            }
+            public int PackArray(ReadOnlySpan<float> values)
+            {
+                int elemSize = GetTypeSize(ValueType.Float);
+                int basePtr = Malloc(elemSize * values.Length, ValueType.Float, isArray: true);
+                MemoryMarshal.AsBytes(values).CopyTo(RawMemory.AsSpan(basePtr, elemSize * values.Length));
+                return basePtr;
+            }
+            public int PackArray(ReadOnlySpan<double> values)
+            {
+                int elemSize = GetTypeSize(ValueType.Double);
+                int basePtr = Malloc(elemSize * values.Length, ValueType.Double, isArray: true);
+                MemoryMarshal.AsBytes(values).CopyTo(RawMemory.AsSpan(basePtr, elemSize * values.Length));
+                return basePtr;
+            }
 
             #endregion
             internal int AddObject(object o) => _handles.Add(o);

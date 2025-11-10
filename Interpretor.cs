@@ -138,13 +138,15 @@
             for (int i = 0; i < printNames.Length; i++)
             {
                 Context.RegisterNative(printNames[i], (string str) => { if (Output.Length + str?.Length < MaxOutputLen) Output += (str + '\n'); if (consoleOutput) Console.WriteLine(str); });
-                Context.RegisterNative(printNames[i], (int str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-                Context.RegisterNative(printNames[i], (ulong str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-                Context.RegisterNative(printNames[i], (double str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-                Context.RegisterNative(printNames[i], (bool str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (int str) => { if (Output.Length < MaxOutputLen) Output += str + "\n"; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (ulong str) => { if (Output.Length < MaxOutputLen) Output += str + "\n"; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (double str) => { if (Output.Length < MaxOutputLen) Output += str + "\n"; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (bool str) => { if (Output.Length < MaxOutputLen) Output += str + "\n"; if (consoleOutput) Console.WriteLine(str); });
                 Context.RegisterNative(printNames[i], (char str) => { if (Output.Length < MaxOutputLen) Output += str + '\n'; if (consoleOutput) Console.WriteLine(str); });
-                Context.RegisterNative(printNames[i], (DateTime str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
-                Context.RegisterNative(printNames[i], (TimeSpan str) => { if (Output.Length < MaxOutputLen) Output += str.ToString() + '\n'; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (DateTime str) => { if (Output.Length < MaxOutputLen) Output += str + "\n"; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (TimeSpan str) => { if (Output.Length < MaxOutputLen) Output += str + "\n"; if (consoleOutput) Console.WriteLine(str); });
+                Context.RegisterNative(printNames[i], (Action<DateTime>)(str => { if (Output.Length < MaxOutputLen) Output += str + "\n"; if (consoleOutput) Console.WriteLine(str); }));
+                Context.RegisterNative(printNames[i], (Action<TimeSpan>)(str => { if (Output.Length < MaxOutputLen) Output += str + "\n"; if (consoleOutput) Console.WriteLine(str); }));
             }
 
             this.Context.RegisterNative("Console.Write", (string str) => { if (Output.Length + str?.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
@@ -155,6 +157,8 @@
             this.Context.RegisterNative("Console.Write", (char str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (DateTime str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
             this.Context.RegisterNative("Console.Write", (TimeSpan str) => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); });
+            this.Context.RegisterNative("Console.Write", (Action<DateTime>)(str => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); }));
+            this.Context.RegisterNative("Console.Write", (Action<TimeSpan>)(str => { if (Output.Length < MaxOutputLen) Output += str; if (consoleOutput) Console.Write(str); }));
 
             this.Context.RegisterNative("typeof", (object o) => {
                 return o is null ? "Null"
@@ -224,23 +228,23 @@
             this.Context.RegisterNative("InRange", (string s, int end) => s.Substring(0, end));
             #region char
             this.Context.RegisterNative("IsDigit", (char c) => { return char.IsDigit(c); });
-            this.Context.RegisterNative("Char.IsDigit", (char c) => { return char.IsDigit(c); });
+            this.Context.RegisterNative("char.IsDigit", (char c) => { return char.IsDigit(c); });
             this.Context.RegisterNative("IsLetter", (char c) => { return char.IsLetter(c); });
-            this.Context.RegisterNative("Char.IsLetter", (char c) => { return char.IsLetter(c); });
+            this.Context.RegisterNative("char.IsLetter", (char c) => { return char.IsLetter(c); });
             this.Context.RegisterNative("IsWhiteSpace", (char c) => { return char.IsWhiteSpace(c); });
-            this.Context.RegisterNative("Char.IsWhiteSpace", (char c) => { return char.IsWhiteSpace(c); });
+            this.Context.RegisterNative("char.IsWhiteSpace", (char c) => { return char.IsWhiteSpace(c); });
             this.Context.RegisterNative("IsLetterOrDigit", (char c) => { return char.IsLetterOrDigit(c); });
-            this.Context.RegisterNative("Char.IsLetterOrDigit", (char c) => { return char.IsLetterOrDigit(c); });
-            this.Context.RegisterNative("Char.ToUpper", (char c) => { return char.ToUpperInvariant(c); });
+            this.Context.RegisterNative("char.IsLetterOrDigit", (char c) => { return char.IsLetterOrDigit(c); });
+            this.Context.RegisterNative("char.ToUpper", (char c) => { return char.ToUpperInvariant(c); });
             this.Context.RegisterNative("ToUpper", (char c) => { return char.ToUpperInvariant(c); });
-            this.Context.RegisterNative("Char.ToLower", (char c) => { return char.ToLowerInvariant(c); });
+            this.Context.RegisterNative("char.ToLower", (char c) => { return char.ToLowerInvariant(c); });
             this.Context.RegisterNative("ToLower", (char c) => { return char.ToLowerInvariant(c); });
             #endregion
             this.Context.RegisterNative("Join", (Func<string, string, string>)Join);
             this.Context.RegisterNative("Join", (int varaiable, char separator) => { return Join(separator.ToString(), varaiable); });
-            this.Context.RegisterNative("String.Join", (char separator, int varaiable) => { return Join(separator.ToString(), varaiable); });
+            this.Context.RegisterNative("string.Join", (char separator, int varaiable) => { return Join(separator.ToString(), varaiable); });
             this.Context.RegisterNative("Join", (int varaiable, string separator) => { return Join(separator, varaiable); });
-            this.Context.RegisterNative("String.Join", (string separator, int varaiable) => { return Join(separator, varaiable); });
+            this.Context.RegisterNative("string.Join", (string separator, int varaiable) => { return Join(separator, varaiable); });
             this.Context.RegisterNative("Join", (int varaiable) => { return Join(", ", varaiable); });
             #region Random
             this.Context.RegisterNative("Random.Next", (Func<int, int, int>)Random.Shared.Next);
@@ -288,6 +292,36 @@
             this.Context.RegisterNative("TimeSpan.FromTicks", (long x) => TimeSpan.FromTicks(x));
             #endregion
             #region Math
+            #region Vectors
+            this.Context.RegisterNative("X", (Func<System.Drawing.Point, int>)((System.Drawing.Point p) => p.X));
+            this.Context.RegisterNative("Y", (Func<System.Drawing.Point, int>)((System.Drawing.Point p) => p.Y));
+            this.Context.RegisterNative("X", (Func<System.Numerics.Vector3, float>)((System.Numerics.Vector3 v) => v.X));
+            this.Context.RegisterNative("Y", (Func<System.Numerics.Vector3, float>)((System.Numerics.Vector3 v) => v.Y));
+            this.Context.RegisterNative("Z", (Func<System.Numerics.Vector3, float>)((System.Numerics.Vector3 v) => v.Z));
+            this.Context.RegisterNative("Vector3", (Func<float, float, float, System.Numerics.Vector3>)((float x, float y, float z) => new System.Numerics.Vector3(x, y, z)));
+            this.Context.RegisterNative("Length", (Func<System.Numerics.Vector3, float>)((System.Numerics.Vector3 v) => v.Length()));
+            this.Context.RegisterNative("LengthSquared", (Func<System.Numerics.Vector3, float>)((System.Numerics.Vector3 v) => v.LengthSquared()));
+            this.Context.RegisterNative("Vector3.Normalize", (Func<System.Numerics.Vector3, System.Numerics.Vector3>)((System.Numerics.Vector3 v) => System.Numerics.Vector3.Normalize(v)));
+            this.Context.RegisterNative("Vector3.Dot", (Func<System.Numerics.Vector3, System.Numerics.Vector3, float>)
+                ((System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Dot(a, b)));
+            this.Context.RegisterNative("Vector3.Cross", (Func<System.Numerics.Vector3, System.Numerics.Vector3, System.Numerics.Vector3>)
+                ((System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Cross(a, b)));
+            this.Context.RegisterNative("Vector3.Distance", (Func<System.Numerics.Vector3, System.Numerics.Vector3, float>)
+                ((System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Distance(a, b)));
+            this.Context.RegisterNative("Vector3.DistanceSquared", (Func<System.Numerics.Vector3, System.Numerics.Vector3, float>)
+                ((System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.DistanceSquared(a, b)));
+            this.Context.RegisterNative("Vector3.Min", (Func<System.Numerics.Vector3, System.Numerics.Vector3, System.Numerics.Vector3>)
+                ((System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Min(a, b)));
+            this.Context.RegisterNative("Vector3.Max", (Func<System.Numerics.Vector3, System.Numerics.Vector3, System.Numerics.Vector3>)
+                ((System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Max(a, b)));
+            this.Context.RegisterNative("Vector3.Clamp", (Func<System.Numerics.Vector3, System.Numerics.Vector3, System.Numerics.Vector3, System.Numerics.Vector3>)
+                ((System.Numerics.Vector3 v, System.Numerics.Vector3 min, System.Numerics.Vector3 max) => System.Numerics.Vector3.Clamp(v, min, max)));
+            this.Context.RegisterNative("Vector3.Lerp", (Func<System.Numerics.Vector3, System.Numerics.Vector3, float, System.Numerics.Vector3>)
+                ((System.Numerics.Vector3 a, System.Numerics.Vector3 b, float t) => System.Numerics.Vector3.Lerp(a, b, t)));
+            this.Context.RegisterNative("Vector3.Reflect", (Func<System.Numerics.Vector3, System.Numerics.Vector3, System.Numerics.Vector3>)
+                ((System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Reflect(a, b)));
+
+            #endregion
             this.Context.RegisterNative("Math.Abs", (double x) => Math.Abs(x));
             this.Context.RegisterNative("Math.Abs", (decimal x) => Math.Abs(x));
             this.Context.RegisterNative("Math.Abs", (int x) => Math.Abs(x));
@@ -380,6 +414,8 @@
             this.Context.Declare("UInt16.MaxValue", Ast.ValueType.UShort, UInt16.MaxValue);
             this.Context.Declare("Int32.MinValue", Ast.ValueType.Int, Int32.MinValue);
             this.Context.Declare("Int32.MaxValue", Ast.ValueType.Int, Int32.MaxValue);
+            this.Context.Declare("int.MinValue", Ast.ValueType.Int, Int32.MinValue);
+            this.Context.Declare("int.MaxValue", Ast.ValueType.Int, Int32.MaxValue);
             this.Context.Declare("UInt32.MinValue", Ast.ValueType.Uint, UInt32.MinValue);
             this.Context.Declare("UInt32.MaxValue", Ast.ValueType.Uint, UInt32.MaxValue);
             this.Context.Declare("Int64.MinValue", Ast.ValueType.Long, Int64.MinValue);
@@ -391,11 +427,12 @@
             #endregion
             #region string
             this.Context.RegisterNative("String.Empty", () => "");
+            this.Context.RegisterNative("string.Empty", () => "");
             this.Context.RegisterNative("Environment.NewLine", () => "\n");
             this.Context.RegisterNative("IsNullOrEmpty", (string str) => string.IsNullOrEmpty(str));
-            this.Context.RegisterNative("String.IsNullOrEmpty", (string str) => string.IsNullOrEmpty(str));
+            this.Context.RegisterNative("string.IsNullOrEmpty", (string str) => string.IsNullOrEmpty(str));
             this.Context.RegisterNative("IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
-            this.Context.RegisterNative("String.IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
+            this.Context.RegisterNative("string.IsNullOrWhiteSpace", (string str) => string.IsNullOrWhiteSpace(str));
             this.Context.RegisterNative("Substring", (string str, int start) => Context.PackReference(str.Substring(start), ValueType.String));
             this.Context.RegisterNative("Substring", (string str, int start, int len) => Context.PackReference(str.Substring(start, len), ValueType.String));
             this.Context.RegisterNative("Trim", (string s) => s.Trim());
@@ -474,28 +511,42 @@
             #endregion
             this.Context.RegisterNative("InvokeByAttribute", (string attr, string[] attrArgs, object[] callArgs)
                 => InvokeByAttribute(this.Context, attr, attrArgs, callArgs));
-
-            this.Context.RegisterNative("IntParse", (string val) => { return int.Parse(val); });
-            this.Context.RegisterNative("Int.Parse", (string val) => { return int.Parse(val); });
-            this.Context.RegisterNative("IntParse", (char val) => { return (int)(val - '0'); });
-            this.Context.RegisterNative("Int.Parse", (char val) => { return (int)(val - '0'); });
-            this.Context.RegisterNative("UIntParse", (string val) => { return uint.Parse(val); });
-            this.Context.RegisterNative("Uint.Parse", (string val) => { return uint.Parse(val); });
-            this.Context.RegisterNative("LongParse", (string val) => { return long.Parse(val); });
-            this.Context.RegisterNative("Long.Parse", (string val) => { return long.Parse(val); });
-            this.Context.RegisterNative("ULongParse", (string val) => { return ulong.Parse(val); });
-            this.Context.RegisterNative("ULong.Parse", (string val) => { return ulong.Parse(val); });
-            this.Context.RegisterNative("Ulong.Parse", (string val) => { return ulong.Parse(val); });
-            this.Context.RegisterNative("DoubleParse", (string val) => { return double.Parse(val); });
-            this.Context.RegisterNative("Double.Parse", (string val) => { return double.Parse(val); });
-            this.Context.RegisterNative("FloatParse", (string val) => { return float.Parse(val); });
-            this.Context.RegisterNative("Float.Parse", (string val) => { return float.Parse(val); });
-            this.Context.RegisterNative("DecimalParse", (string val) => { return decimal.Parse(val); });
-            this.Context.RegisterNative("Decimal.Parse", (string val) => { return decimal.Parse(val); });
-            this.Context.RegisterNative("ByteParse", (string val) => { return byte.Parse(val); });
-            this.Context.RegisterNative("Byte.Parse", (string val) => { return byte.Parse(val); });
-            this.Context.RegisterNative("ByteParse", (char val) => { return (byte)(val - '0'); });
-            this.Context.RegisterNative("Byte.Parse", (char val) => { return (byte)(val - '0'); });
+            #region Cast
+            this.Context.RegisterNative("int.Parse", (string val) => { return int.Parse(val); });
+            this.Context.RegisterNative("int.Parse", (char val) => { return (int)(val - '0'); });
+            this.Context.RegisterNative("uint.Parse", (string val) => { return uint.Parse(val); });
+            this.Context.RegisterNative("short.Parse", (string val) => { return short.Parse(val); });
+            this.Context.RegisterNative("ushort.Parse", (string val) => { return ushort.Parse(val); });
+            this.Context.RegisterNative("long.Parse", (string val) => { return long.Parse(val); });
+            this.Context.RegisterNative("ulong.Parse", (string val) => { return ulong.Parse(val); });
+            this.Context.RegisterNative("double.Parse", (string val) => { return double.Parse(val); });
+            this.Context.RegisterNative("float.Parse", (string val) => { return float.Parse(val); });
+            this.Context.RegisterNative("decimal.Parse", (string val) => { return decimal.Parse(val); });
+            this.Context.RegisterNative("sbyte.Parse", (string val) => { return sbyte.Parse(val); });
+            this.Context.RegisterNative("byte.Parse", (string val) => { return byte.Parse(val); });
+            this.Context.RegisterNative("byte.Parse", (char val) => { return (byte)(val - '0'); });
+            this.Context.RegisterNative("bool.Parse", (string val) => { return bool.Parse(val); }); 
+            this.Context.RegisterNative("char.TryParse", (string s, int addr) => { var ok = char.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("int.TryParse", (string s, int addr) => { var ok = int.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("uint.TryParse", (string s, int addr) => { var ok = uint.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("long.TryParse", (string s, int addr) => { var ok = long.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("ulong.TryParse", (string s, int addr) => { var ok = ulong.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("short.TryParse", (string s, int addr) => { var ok = short.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("ushort.TryParse", (string s, int addr) => { var ok = ushort.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("byte.TryParse", (string s, int addr) => { var ok = byte.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("sbyte.TryParse", (string s, int addr) => { var ok = sbyte.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("double.TryParse", (string s, int addr) => { var ok = double.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("float.TryParse", (string s, int addr) => { var ok = float.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("decimal.TryParse", (string s, int addr) => { var ok = decimal.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("bool.TryParse", (string s, int addr) => { var ok = bool.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("char.TryParse", (string s, int addr) => { var ok = char.TryParse(s, out var v); Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("DateTime.TryParse", (string s, int addr) => {
+                var ok = DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out var v);
+                Context.AssignByAddress(addr, v); return ok; });
+            this.Context.RegisterNative("TimeSpan.TryParse", (string s, int addr) => {
+                var ok = TimeSpan.TryParse(s, CultureInfo.InvariantCulture, out var v);
+                Context.AssignByAddress(addr, v); return ok; });
+            #endregion
             this.Context.RegisterNative("Invoke", (Func<object, object>)(id => Context.InvokeById(id)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object>)((id, a1) => Context.InvokeById(id, a1)));
             this.Context.RegisterNative("Invoke", (Func<object, object, object, object>)((id, a1, a2) => Context.InvokeById(id, a1, a2)));
@@ -567,63 +618,6 @@
             }
             return this.Context.IsArray(ptr) ? ValueType.Array : this.Context.GetHeapObjectType(ptr);
         }
-        private static bool MatchVariableType(object? value, ValueType type) => value is null ? false : type switch
-        {
-            ValueType.Int => value is int,
-            ValueType.String => value is string,
-            ValueType.Bool => value is bool,
-            ValueType.Double => value is double,
-            ValueType.Char => value is char,
-            ValueType.Short => value is short,
-            ValueType.Long => value is long,
-            ValueType.Ulong => value is ulong,
-            ValueType.Uint => value is uint,
-            ValueType.Byte => value is byte,
-            ValueType.Sbyte => value is sbyte,
-            ValueType.UShort => value is ushort,
-            ValueType.Float => value is float,
-            ValueType.Decimal => value is decimal,
-            ValueType.Object => value is object,
-            ValueType.IntPtr => value is int,
-            ValueType.Reference => value is int,
-            ValueType.Nullable => value is null || !IsReferenceType(ExecutionContext.InferType(value)),
-            ValueType.Struct => value is int,
-            ValueType.Class => value is int,
-            ValueType.Tuple => value is int,
-            ValueType.Dictionary => value is int,
-            ValueType.DateTime => value is DateTime,
-            ValueType.TimeSpan => value is TimeSpan,
-            ValueType.Array => value is ValueTuple<int, ValueType>
-            || value is ValueTuple<object?[], ValueType>
-            || value is int,
-            _ => false
-        };
-        public static bool IsReferenceType(ValueType type) => type switch
-        {
-            ValueType.Double => false,
-            ValueType.Float => false,
-            ValueType.Decimal => false,
-            ValueType.Int => false,
-            ValueType.Uint => false,
-            ValueType.Long => false,
-            ValueType.Ulong => false,
-            ValueType.Short => false,
-            ValueType.UShort => false,
-            ValueType.Byte => false,
-            ValueType.Sbyte => false,
-            ValueType.Char => false,
-            ValueType.Bool => false,
-            ValueType.IntPtr => false,
-            ValueType.Reference => false,
-            ValueType.DateTime => false,
-            ValueType.TimeSpan => false,
-            _ => true
-        };
-        static bool IsNumeric(Ast.ValueType t) => t is Ast.ValueType.Byte or Ast.ValueType.Sbyte
-            or Ast.ValueType.Short or Ast.ValueType.UShort
-            or Ast.ValueType.Int or Ast.ValueType.Uint
-            or Ast.ValueType.Long or Ast.ValueType.Ulong
-            or Ast.ValueType.Float or Ast.ValueType.Double or Ast.ValueType.Decimal;
         private string Join(string separator, string arrayName)
         {
             var varInfo = Context.Get(arrayName);
@@ -1177,6 +1171,29 @@
                 else if (l is ushort us) result = EvaluateBinary(us, Convert.ToUInt16(r), Op);
                 else if (l is byte b) result = EvaluateBinary(b, Convert.ToByte(r), Op);
                 else if (l is sbyte sb) result = EvaluateBinary(sb, Convert.ToSByte(r), Op);
+                else if (l is System.Numerics.Vector3 lvec && r is System.Numerics.Vector3 rvec)
+                {
+                    result = Op switch
+                    {
+                        OperatorToken.Plus or OperatorToken.PlusEqual => lvec + rvec,
+                        OperatorToken.Minus or OperatorToken.MinusEqual => lvec - rvec,
+                        OperatorToken.Multiply or OperatorToken.MultiplyEqual => lvec * rvec,
+                        OperatorToken.Divide or OperatorToken.DivideEqual => lvec / rvec,
+                        OperatorToken.Equal => lvec == rvec,
+                        OperatorToken.NotEqual => lvec != rvec,
+                        _ => throw new ApplicationException($"Unsupported operator {Op} for Vector")
+                    };
+                }
+                else if (l is System.Numerics.Vector3 lvf && r is IConvertible)
+                {
+                    float rf = Convert.ToSingle(r, System.Globalization.CultureInfo.InvariantCulture);
+                    result = Op switch
+                    {
+                        OperatorToken.Multiply or OperatorToken.MultiplyEqual => lvf * rf,
+                        OperatorToken.Divide or OperatorToken.DivideEqual => lvf / rf,
+                        _ => throw new ApplicationException($"Unsupported operator {Op} for Vector and scalar")
+                    };
+                }
                 else if (l is DateTime dt && r is TimeSpan ts) result = Op switch
                 {
                     OperatorToken.Plus or OperatorToken.PlusEqual => dt + ts,

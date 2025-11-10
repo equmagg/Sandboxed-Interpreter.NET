@@ -8,7 +8,7 @@ namespace Interpretor
         public enum ValueType : byte
         {
             Int, Double, Ulong, Uint, Long, Byte, Object, Sbyte, Short, Char, UShort, Float, Decimal, IntPtr, String, Bool, DateTime, TimeSpan,
-            Array, Enum, Nullable, Struct, Class, Tuple, Dictionary, Reference
+            Array, Enum, Nullable, Struct, Class, Tuple, Dictionary, Reference, Point, Vector3
         }
         public enum Associativity { Left, Right }
         public enum OperatorToken
@@ -123,6 +123,69 @@ namespace Interpretor
             { OperatorToken.NullDefaultEqual, new OperatorInfo(0, Associativity.Right) }, // ??=
             //{ OperatorToken.Lambda, new OperatorInfo(0, Associativity.Right) },
         };
+
+        private static bool MatchVariableType(object? value, ValueType type) => value is null ? false : type switch
+        {
+            ValueType.Int => value is int,
+            ValueType.String => value is string,
+            ValueType.Bool => value is bool,
+            ValueType.Double => value is double,
+            ValueType.Char => value is char,
+            ValueType.Short => value is short,
+            ValueType.Long => value is long,
+            ValueType.Ulong => value is ulong,
+            ValueType.Uint => value is uint,
+            ValueType.Byte => value is byte,
+            ValueType.Sbyte => value is sbyte,
+            ValueType.UShort => value is ushort,
+            ValueType.Float => value is float,
+            ValueType.Decimal => value is decimal,
+            ValueType.Object => value is object,
+            ValueType.IntPtr => value is int,
+            ValueType.Reference => value is int,
+            ValueType.Nullable => value is null || !IsReferenceType(ExecutionContext.InferType(value)),
+            ValueType.Struct => value is int,
+            ValueType.Class => value is int,
+            ValueType.Tuple => value is int,
+            ValueType.Dictionary => value is int,
+            ValueType.DateTime => value is DateTime,
+            ValueType.TimeSpan => value is TimeSpan,
+            ValueType.Array => value is ValueTuple<int, ValueType>
+            || value is ValueTuple<object[], ValueType>
+            || value is int,
+            ValueType.Point => value is System.Drawing.Point,
+            ValueType.Vector3 => value is System.Numerics.Vector3,
+            _ => false
+        };
+        public static bool IsReferenceType(ValueType type) => type switch
+        {
+            ValueType.Double => false,
+            ValueType.Float => false,
+            ValueType.Decimal => false,
+            ValueType.Int => false,
+            ValueType.Uint => false,
+            ValueType.Long => false,
+            ValueType.Ulong => false,
+            ValueType.Short => false,
+            ValueType.UShort => false,
+            ValueType.Byte => false,
+            ValueType.Sbyte => false,
+            ValueType.Char => false,
+            ValueType.Bool => false,
+            ValueType.IntPtr => false,
+            ValueType.Reference => false,
+            ValueType.DateTime => false,
+            ValueType.TimeSpan => false,
+            ValueType.Point => false,
+            ValueType.Vector3 => false,
+            _ => true
+        };
+        static bool IsNumeric(Ast.ValueType t) => t is Ast.ValueType.Byte or Ast.ValueType.Sbyte
+            or Ast.ValueType.Short or Ast.ValueType.UShort
+            or Ast.ValueType.Int or Ast.ValueType.Uint
+            or Ast.ValueType.Long or Ast.ValueType.Ulong
+            or Ast.ValueType.Float or Ast.ValueType.Double or Ast.ValueType.Decimal;
+        
     }
     public partial class Lexer
     {
