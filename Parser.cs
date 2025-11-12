@@ -281,13 +281,13 @@ namespace Interpretor
                 _lexer.NextToken(); // skip where
 
                 if (_lexer.CurrentTokenType != Ast.TokenType.Identifier)
-                    throw new ApplicationException("Expecter parameter name after 'where'.");
+                    throw new ParseException("Expecter parameter name after 'where'.");
 
                 string tp = _lexer.CurrentTokenText;
                 _lexer.NextToken(); // skip name
 
                 if (_lexer.CurrentTokenType != Ast.TokenType.Colon)
-                    throw new ApplicationException("Expected ':' after parameter name in 'where'.");
+                    throw new ParseException("Expected ':' after parameter name in 'where'.");
 
                 _lexer.NextToken(); // skip :
 
@@ -306,9 +306,9 @@ namespace Interpretor
                 while (true)
                 {
                     if (++iters > maxIters)
-                        throw new ApplicationException("Constraints argument parsing exceeded sane iteration limit.");
+                        throw new ParseException("Constraints argument parsing exceeded sane iteration limit.");
                     if (sb.Length > (_lexer.GetCodeLength() * 2))
-                        throw new ApplicationException("Constraints argument text is too large (possible runaway parse).");
+                        throw new ParseException("Constraints argument text is too large (possible runaway parse).");
                     if (depth == 0 && pdepth == 0)
                     {
                         if (_lexer.CurrentTokenType == Ast.TokenType.Comma) { _lexer.NextToken(); Flush(); continue; }
@@ -367,16 +367,16 @@ namespace Interpretor
             while (true)
             {
                 if (++iters > maxIters)
-                    throw new ApplicationException("Generic argument parsing exceeded sane iteration limit.");
+                    throw new ParseException("Generic argument parsing exceeded sane iteration limit.");
                 if (sb.Length > (_lexer.GetCodeLength() * 2))
-                    throw new ApplicationException("Generic argument text is too large (possible runaway parse).");
+                    throw new ParseException("Generic argument text is too large (possible runaway parse).");
                 if (_lexer.Position == lastPos && _lexer.CurrentTokenText == lastTok)
-                    throw new ApplicationException("Stuck while parsing generic arguments (no lexer progress).");
+                    throw new ParseException("Stuck while parsing generic arguments (no lexer progress).");
                 lastPos = _lexer.Position; lastTok = _lexer.CurrentTokenText;
                 if (depth == 0 && _lexer.CurrentTokenType is not Ast.TokenType.Identifier and not Ast.TokenType.Keyword
                     and not Ast.TokenType.Comma and not Ast.TokenType.Operator)
                 {
-                    throw new ApplicationException($"Unexpected token '{_lexer.CurrentTokenText}' in type argument list.");
+                    throw new ParseException($"Unexpected token '{_lexer.CurrentTokenText}' in type argument list.");
                 }
                 if (IsOp("<")) { depth++; sb.Append('<'); _lexer.NextToken(); continue; }
 
@@ -385,7 +385,7 @@ namespace Interpretor
                     if (depth == 0)
                     {
                         var part = sb.ToString().Trim();
-                        if (part.Length == 0) throw new ApplicationException("Argument cannot be empty.");
+                        if (part.Length == 0) throw new ParseException("Argument cannot be empty.");
                         args.Add(part);
                         int end = _lexer.Position, start = end - _lexer.CurrentTokenText.Length;
                         if (IsOp(">>>"))
@@ -400,7 +400,7 @@ namespace Interpretor
                     else
                     {
                         depth--;
-                        if (depth < 0) throw new ApplicationException("Negative generic depth.");
+                        if (depth < 0) throw new ParseException("Negative generic depth.");
                         sb.Append('>');
 
                         int end = _lexer.Position, start = end - _lexer.CurrentTokenText.Length;
@@ -417,7 +417,7 @@ namespace Interpretor
                 {
                     var part = sb.ToString().Trim();
                     if (part.Length == 0)
-                        throw new ApplicationException("Type argument cannot be empty.");
+                        throw new ParseException("Type argument cannot be empty.");
                     args.Add(part);
                     sb.Clear();
                     _lexer.NextToken();
@@ -492,6 +492,7 @@ namespace Interpretor
             }
             catch (ParseException ex)
             {
+                Report(ex);
                 var miss = new Ast.MissingNode(ex, start);
                 Synchronize(Ast.TokenType.Semicolon, Ast.TokenType.BraceClose);
                 if (TryConsume(Ast.TokenType.Semicolon)) { }
@@ -1632,7 +1633,11 @@ namespace Interpretor
                                     last = _lexer.CurrentTokenText;
                                     _lexer.NextToken();
                                 }
-                                else throw new ParseException("Identifier expected after '.' in nameof(...)");
+                                else
+                                {
+                                    Report(MakeParseError("Identifier expected after '.' in nameof(...)"));
+                                    break;
+                                }
                             }
                         }
                         Consume(Ast.TokenType.ParenClose);
@@ -1817,7 +1822,7 @@ namespace Interpretor
                                     {
                                         _lexer.NextToken(); // skip ref
                                         if (sawNamed)
-                                            throw new ApplicationException("'ref' argument cannot appear after named argument.");
+                                            throw new ParseException("'ref' argument cannot appear after named argument.");
                                         var targetExpr = ParseExpression();
                                         args.Add(new Ast.UnaryOpNode(Ast.OperatorToken.AddressOf, targetExpr));
                                         argNames.Add(null);
@@ -2681,7 +2686,7 @@ namespace Interpretor
             {
                 _lexer.NextToken(); // ':'
                 if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword || _lexer.CurrentTokenType == Ast.TokenType.Identifier))
-                    throw new ApplicationException("Expecteed this or base after ':'");
+                    throw new ParseException("Expecteed this or base after ':'");
                 string kind = _lexer.CurrentTokenText; //this or base
                 _lexer.NextToken();
                 Consume(Ast.TokenType.ParenOpen);
@@ -3124,8 +3129,14 @@ namespace Interpretor
                 types = new[] { vt };
             }
             if (_lexer.CurrentTokenText != "in")
-                throw new ParseException($"Expected 'in', but got {_lexer.CurrentTokenText}");
-            _lexer.NextToken(); // skip in
+            {
+                Report(MakeParseError($"Expected 'in', but got {_lexer.CurrentTokenText}"));
+                Synchronize(Ast.TokenType.ParenClose);
+            }
+            else
+            {
+                _lexer.NextToken(); // skip in
+            }
             var collectionExpr = ParseExpression();
             Consume(Ast.TokenType.ParenClose);
             var body = _lexer.CurrentTokenType == Ast.TokenType.BraceOpen ? ParseBlock() : ParseStatement();
