@@ -1903,11 +1903,10 @@ namespace Interpretor
 
                                 Consume(Ast.TokenType.BracketsClose);
 
-                                var args = new List<Ast.AstNode> { node };
-                                if (hasStart) args.Add(startExpr!);
-                                if (endExpr != null) args.Add(endExpr);
+                                Ast.AstNode startNode = hasStart ? startExpr! : new Ast.LiteralNode(0);
+                                Ast.AstNode endNode = endExpr ?? new Ast.CallNode("Length", new Ast.AstNode[] { node });
 
-                                node = new Ast.CallNode("InRange", args.ToArray()) { IsNullConditional = nullIndex };
+                                node = new Ast.CallNode("InRange", new Ast.AstNode[] { node, startNode, endNode }) { IsNullConditional = nullIndex };
                                 continue;
                             }
 
@@ -2368,13 +2367,13 @@ namespace Interpretor
                         {
                             isRef = true;
                             _lexer.NextToken(); // skip ref
-                            if (isParams) throw new ParseException("'params' cannot be combined with 'ref'.");
+                            if (isParams) Report(MakeParseError("'params' cannot be combined with 'ref'."));
                         }
                         if (_lexer.CurrentTokenText == "out")
                         {
                             isRef = true;
                             _lexer.NextToken(); // skip out
-                            if (isParams) throw new ParseException("'params' cannot be combined with 'out'.");
+                            if (isParams) Report(MakeParseError("'params' cannot be combined with 'out'."));
                         }
                     }
                     var pType = Ast.ValueType.Object;
@@ -2617,11 +2616,11 @@ namespace Interpretor
                         {
                             isRef = true;
                             _lexer.NextToken(); // skip ref
-                            if (isParams) throw new ParseException("'params' cannot be combined with 'ref'.");
+                            if (isParams) Report(MakeParseError("'params' cannot be combined with 'ref'."));
                         }
                         if (_lexer.CurrentTokenText == "out")
                         {
-                            throw new ParseException("'out' modifier cannot be inside a constructor.");
+                            Report(MakeParseError("'out' modifier cannot be inside a constructor."));
                         }
                     }
                     var pType = Ast.ValueType.Object;
@@ -3263,7 +3262,11 @@ namespace Interpretor
             var tryBody = _lexer.CurrentTokenType == Ast.TokenType.BraceOpen ? ParseBlock() : ParseStatement();
 
             if (!(_lexer.CurrentTokenType == Ast.TokenType.Keyword && _lexer.CurrentTokenText == "catch"))
-                throw new ParseException("expected 'catch' after 'try' block");
+            {
+                var error = MakeParseError("expected 'catch' after 'try' block");
+                Report(error);
+                return new Ast.TryCatchNode(tryBody, new Ast.MissingNode(error, _lexer.Position), null, null);
+            }
             _lexer.NextToken(); //skip catch
 
             string? exVar = null;

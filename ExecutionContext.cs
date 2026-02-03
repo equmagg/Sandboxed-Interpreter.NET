@@ -378,6 +378,7 @@ namespace Interpretor
 
             #endregion
             #region Heap manager
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public int Pin(object? val)
             {
                 if (val is int addr && addr >= StackSize)
@@ -391,12 +392,26 @@ namespace Interpretor
 
                 return -1;
             }
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             private int AddPin(int addr)
             {
                 _pinned.Add(addr);
                 return addr;
             }
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
             public void Unpin(int key) => _pinned.Remove(key);
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            private bool IsHeapPayloadPtr(int p)
+            {
+                int heapStart = StackSize + HeaderSize;
+                int heapEnd = StackSize + _heapend;
+
+                if (p < heapStart || p > heapEnd) return false;
+
+                if (p == heapEnd) return _heapend >= HeaderSize && GetHeapObjectLength(p) == 0;
+
+                return true;
+            }
             public void CollectGarbage()
             {
                 //Mark
@@ -409,7 +424,7 @@ namespace Interpretor
                         if (Ast.IsReferenceType(v.Type) || v.Type == Ast.ValueType.IntPtr || v.Type == Ast.ValueType.Array)
                         {
                             int root = BitConverter.ToInt32(_memory, v.Address);
-                            if (root >= StackSize && root < StackSize + _heapend)
+                            if (IsHeapPayloadPtr(root))
                                 Mark(root, reachable);
                         }
                     }
@@ -431,7 +446,7 @@ namespace Interpretor
             }
             private void Mark(int ptr, HashSet<int> reachable)
             {
-                if (ptr < StackSize || ptr >= StackSize + _heapend) return;
+                if (!IsHeapPayloadPtr(ptr)) return;
                 if (!reachable.Add(ptr)) return;
 
                 var vt = GetHeapObjectType(ptr);
@@ -452,7 +467,7 @@ namespace Interpretor
                         if (IsReferenceType(baseT) && bytes >= 1 + sizeof(int))
                         {
                             int child = BitConverter.ToInt32(_memory, ptr + 1);
-                            if (child >= StackSize && child < heapEnd) Mark(child, reachable);
+                            if (IsHeapPayloadPtr(child)) Mark(child, reachable);
                         }
                     }
                     return;
@@ -469,7 +484,7 @@ namespace Interpretor
                         int at = ptr + i * sizeof(int);
                         if (at + sizeof(int) > heapEnd) break;
                         int child = BitConverter.ToInt32(_memory, at);
-                        if (child >= StackSize && child < heapEnd) Mark(child, reachable);
+                        if (IsHeapPayloadPtr(child)) Mark(child, reachable);
                     }
                     return;
                 }
@@ -1991,6 +2006,29 @@ namespace Interpretor
                                     ? DerefReference(addr, elemType)
                                     : ReadFromStack(addr, elemType);
                     if (!Convert.ToBoolean(InvokeById(lambdaId, val!)))
+                        return false;
+                }
+                return true;
+            }
+            public bool StringAny(string s, object predicate)
+            {
+                int lambdaId = Convert.ToInt32(predicate);
+                for (int i = 0; i < s.Length; i++)
+                {
+                    Check();
+                    if (Convert.ToBoolean(InvokeById(lambdaId, s[i])))
+                        return true;
+                }
+                return false;
+            }
+
+            public bool StringAll(string s, object predicate)
+            {
+                int lambdaId = Convert.ToInt32(predicate);
+                for (int i = 0; i < s.Length; i++)
+                {
+                    Check();
+                    if (!Convert.ToBoolean(InvokeById(lambdaId, s[i])))
                         return false;
                 }
                 return true;

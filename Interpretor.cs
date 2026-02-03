@@ -202,6 +202,8 @@
             this.Context.RegisterNative("Where", (int ptr, object pred) => Context.ArrayWhere(ptr, pred));
             this.Context.RegisterNative("Any", (int ptr, object pred) => Context.ArrayAny(ptr, pred));
             this.Context.RegisterNative("All", (int ptr, object pred) => Context.ArrayAll(ptr, pred));
+            this.Context.RegisterNative("Any", (string s, object pred) => Context.StringAny(s, pred));
+            this.Context.RegisterNative("All", (string s, object pred) => Context.StringAll(s, pred));
             this.Context.RegisterNative("MinBy", (int p, object sel) => Context.ArrayExtremum(p, sel, true));
             this.Context.RegisterNative("MaxBy", (int p, object sel) => Context.ArrayExtremum(p, sel, false));
             this.Context.RegisterNative("Count", (int p, object pr) => Context.ArrayCount(p, pr));
